@@ -2,17 +2,17 @@
 // Запуск:  ./wind -s --build demo.wnd  (соберёт ./app2 и запустит) //
 // Комментарии в Wind ПАРНЫЕ: открываются и закрываются слешами //
 
-// переменные //
-int age = 27
-frac pi = 3,14                 // дробь через ЗАПЯТУЮ, не точку //
-var name = "Wind"              // var: тип выводится сам //
-str hi = "Привет, " + name + "!"
+// переменные: точка между типом и именем ОБЯЗАТЕЛЬНА //
+int.age = 27
+frac.pi = 3,14                 // дробь через ЗАПЯТУЮ, не точку //
+var name = "Wind"              // var: тип выводится сам, тут точки нет //
+str.hi = "Привет, " + name + "!"
 
 terminal.paste -> hi
 terminal.paste -> "возраст {int.age}, pi = {frac.pi}"
 
-// функции и рекурсия //
-func fib(int n) int
+// функции и рекурсия: у параметров тоже точка //
+func fib(int.n) int
     if n < 2
         return n
     end
@@ -31,8 +31,8 @@ else
 end
 
 // массив фиксированного размера //
-int squares[5]
-int i = 0
+int.squares[5]
+int.i = 0
 repeat 5
     squares[i] = i * i
     i += 1
@@ -40,27 +40,27 @@ end
 terminal.paste -> "квадрат[4] = {int.squares[4]}"
 
 // динамический список и методы //
-int list nums = [10, 20, 30]
+int.list.nums = [10, 20, 30]
 nums.add(40)
 nums.add(50)
 terminal.paste -> "в списке {nums.len} чисел, первое = {int.nums[0]}"
 
-// цикл по коллекции //
-int total = 0
+// цикл по коллекции (переменная цикла — без типа, без точки) //
+int.total = 0
 loop x in nums
     total += x
 end
 terminal.paste -> "сумма списка = {int.total}"
 
 // список строк //
-str list friends = ["Аня", "Боря", "Вова"]
+str.list.friends = ["Аня", "Боря", "Вова"]
 loop f in friends
     terminal.paste -> "привет, {str.f}!"
 end
 
 // касты типов //
-str s = to_str(age)
-int back = int("100")
+str.s = to_str(age)
+int.back = int("100")
 terminal.paste -> "age строкой: " + s
 terminal.paste -> "back + 1 = {int.back}"
 

@@ -369,7 +369,7 @@ static Stmt *parse_decl(P *p, int is_global, int line, int col) {
         expect(p, TK_COMMA, ",");
         TokenKind vty = expect_scalar_type(p, "тип значения");
         expect(p, TK_RBRACKET, "]");
-        accept(p, TK_DOT);                       /* точка опциональна: dict[..].x или dict[..] x */
+        expect(p, TK_DOT, "'.' между dict[..] и именем (dict[str,int].cfg)");
         Token *nm = expect(p, TK_IDENT, "имя dict");
         Stmt *s = ast_stmt(ST_VAR_DECL, line, col);
         s->as.decl.is_global = is_global;
@@ -401,10 +401,10 @@ static Stmt *parse_decl(P *p, int is_global, int line, int col) {
     if (!is_scalar_type(ty))
         perr(p, "ожидался тип объявления, получено %s", wind_token_kind_name(ty));
     adv(p);
-    accept(p, TK_DOT);                            /* точка опциональна: int.x или int x */
+    expect(p, TK_DOT, "'.' между типом и именем (например int.x)");
 
     int is_list = 0;
-    if (cur(p) == TK_KW_LIST) { adv(p); accept(p, TK_DOT); is_list = 1; }
+    if (cur(p) == TK_KW_LIST) { adv(p); expect(p, TK_DOT, "'.' после list (int.list.nums)"); is_list = 1; }
 
     Token *nm = expect(p, TK_IDENT, "имя переменной");
     char *name = dup_s(nm->text);
@@ -540,7 +540,7 @@ static Stmt *parse_func(P *p, int line, int col) {
         do {
             skipnl(p);
             TokenKind pty = expect_scalar_type(p, "тип параметра");
-            accept(p, TK_DOT);                    /* точка опциональна: int.x или int x */
+            expect(p, TK_DOT, "'.' между типом и именем параметра (int.x)");
             Token *pn = expect(p, TK_IDENT, "имя параметра");
             if (nparams >= cap) {
                 cap = cap ? cap * 2 : 4;
