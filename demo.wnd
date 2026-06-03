@@ -64,6 +64,16 @@ int.back = int("100")
 terminal.paste -> "age строкой: " + s
 terminal.paste -> "back + 1 = {int.back}"
 
+// словарь (хеш-таблица): dict[ключ, значение].имя //
+dict[str, int].ages = ["Аня": 20, "Боря": 25]
+ages["Вова"] = 30
+terminal.paste -> "в словаре {ages.len} записей"
+str.who = "Боря"
+terminal.paste -> ages[who]                    // значение по ключу-переменной //
+loop person in ages
+    terminal.paste -> "есть запись: {str.person}"
+end
+
 // сравнение строк //
 if name == "Wind"
     terminal.paste -> "язык на месте :)"

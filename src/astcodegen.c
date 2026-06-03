@@ -130,7 +130,7 @@ static WType infer(const Expr *e) {
         case EX_INDEX:  return coll_vtype(e->as.index.coll).elem;
         case EX_DOT: {
             VType ov = coll_vtype(e->as.dot.obj);
-            if (ov.ck == CK_LIST && !strcmp(e->as.dot.field, "len")) return WT_INT;
+            if ((ov.ck == CK_LIST || ov.ck == CK_DICT) && !strcmp(e->as.dot.field, "len")) return WT_INT;
             return WT_UNKNOWN;
         }
         case EX_CALL: {
@@ -144,6 +144,7 @@ static WType infer(const Expr *e) {
             }
             if (c->kind == EX_DOT) {
                 if (!strcmp(c->as.dot.field, "len")) return WT_INT;
+                if (!strcmp(c->as.dot.field, "has")) return WT_BOOL;
                 return WT_VOID;   /* .add / .pop */
             }
             return WT_UNKNOWN;
@@ -181,6 +182,25 @@ static const char *interp_spec(WType t) {
         case WT_STR:  return "%s";
         default: return NULL;
     }
+}
+
+/* упаковка выражения типа t в uint64 для рантайма словарей.
+ * dup_str=1 — строковый ключ копируется (словарь владеет копией). */
+static void emit_dict_pack(FILE *o, WType t, const Expr *e, int dup_str) {
+    if (t == WT_STR) {
+        fputs(dup_str ? "(uint64_t)(uintptr_t)wstr_dup(" : "(uint64_t)(uintptr_t)(", o);
+        emit_expr(o, e); fputc(')', o);
+    } else if (t == WT_FRAC) {
+        fputs("_wd_packf(", o); emit_expr(o, e); fputc(')', o);
+    } else {
+        fputs("(uint64_t)(", o); emit_expr(o, e); fputc(')', o);
+    }
+}
+/* открывающая часть распаковки uint64 -> тип t (закрывается одной ')') */
+static void emit_unpack_open(FILE *o, WType t) {
+    if (t == WT_STR)       fputs("(char*)(uintptr_t)(", o);
+    else if (t == WT_FRAC) fputs("_wd_unpackf(", o);
+    else                   fputs("(int)(", o);
 }
 
 static const char *binop_c(TokenKind op) {
@@ -258,21 +278,30 @@ static void emit_expr(FILE *o, const Expr *e) {
         }
         case EX_CALL: {
             const Expr *c = e->as.call.callee;
-            /* методы списка: nums.add(v) / nums.pop() / nums.len() */
+            /* методы коллекций: nums.add(v)/.pop()/.len(), cfg.has(k)/.len() */
             if (c->kind == EX_DOT) {
                 const Expr *obj = c->as.dot.obj;
                 const char *m = c->as.dot.field;
                 VType ov = coll_vtype(obj);
-                if (ov.ck != CK_LIST) cg_fail("метод .%s поддержан только у списков", m);
-                if (!strcmp(m, "add")) {
-                    if (e->as.call.nargs != 1) cg_fail(".add ждёт ровно 1 аргумент");
-                    fprintf(o, "_wl_push_%s(", list_suffix(ov.elem));
-                    emit_expr(o, obj); fputs(", ", o); emit_expr(o, e->as.call.args[0]); fputc(')', o);
-                } else if (!strcmp(m, "pop")) {
-                    fputs("_wl_pop(", o); emit_expr(o, obj); fputc(')', o);
-                } else if (!strcmp(m, "len")) {
-                    fputs("_wl_len(", o); emit_expr(o, obj); fputc(')', o);
-                } else cg_fail("неизвестный метод списка .%s", m);
+                if (ov.ck == CK_LIST) {
+                    if (!strcmp(m, "add")) {
+                        if (e->as.call.nargs != 1) cg_fail(".add ждёт ровно 1 аргумент");
+                        fprintf(o, "_wl_push_%s(", list_suffix(ov.elem));
+                        emit_expr(o, obj); fputs(", ", o); emit_expr(o, e->as.call.args[0]); fputc(')', o);
+                    } else if (!strcmp(m, "pop")) {
+                        fputs("_wl_pop(", o); emit_expr(o, obj); fputc(')', o);
+                    } else if (!strcmp(m, "len")) {
+                        fputs("_wl_len(", o); emit_expr(o, obj); fputc(')', o);
+                    } else cg_fail("неизвестный метод списка .%s", m);
+                } else if (ov.ck == CK_DICT) {
+                    if (!strcmp(m, "has")) {
+                        if (e->as.call.nargs != 1) cg_fail(".has ждёт ровно 1 аргумент");
+                        fputs("_wd_has(", o); emit_expr(o, obj); fputs(", ", o);
+                        emit_dict_pack(o, ov.key, e->as.call.args[0], 0); fputc(')', o);
+                    } else if (!strcmp(m, "len")) {
+                        fputs("_wd_len(", o); emit_expr(o, obj); fputc(')', o);
+                    } else cg_fail("неизвестный метод словаря .%s", m);
+                } else cg_fail("метод .%s поддержан только у списков/словарей", m);
                 break;
             }
             if (c->kind != EX_IDENT)
@@ -313,22 +342,33 @@ static void emit_expr(FILE *o, const Expr *e) {
             fputc(')', o);
             break;
         }
-        case EX_INDEX: {                              /* nums[i] — массив (нативно) или список (рантайм) */
+        case EX_INDEX: {                              /* coll[idx]: массив / список / словарь */
             VType cv = coll_vtype(e->as.index.coll);
             if (cv.ck == CK_LIST) {
                 fprintf(o, "_wl_get_%s(", list_suffix(cv.elem));
                 emit_expr(o, e->as.index.coll); fputs(", ", o);
                 emit_expr(o, e->as.index.idx); fputc(')', o);
+            } else if (cv.ck == CK_DICT) {
+                emit_unpack_open(o, cv.elem);             /* распаковка значения */
+                fputs("_wd_get(", o);
+                emit_expr(o, e->as.index.coll); fputs(", ", o);
+                emit_dict_pack(o, cv.key, e->as.index.idx, 0);  /* ключ, без dup */
+                fputc(')', o);                            /* close _wd_get */
+                fputc(')', o);                            /* close распаковки */
             } else {
                 emit_expr(o, e->as.index.coll);
                 fputc('[', o); emit_expr(o, e->as.index.idx); fputc(']', o);
             }
             break;
         }
-        case EX_DOT: {                                /* nums.len */
+        case EX_DOT: {                                /* nums.len / cfg.len */
             VType ov = coll_vtype(e->as.dot.obj);
             if (ov.ck == CK_LIST && !strcmp(e->as.dot.field, "len")) {
                 fputs("_wl_len(", o); emit_expr(o, e->as.dot.obj); fputc(')', o);
+                break;
+            }
+            if (ov.ck == CK_DICT && !strcmp(e->as.dot.field, "len")) {
+                fputs("_wd_len(", o); emit_expr(o, e->as.dot.obj); fputc(')', o);
                 break;
             }
             cg_fail("доступ .%s не поддержан", e->as.dot.field);
@@ -395,10 +435,33 @@ static void emit_local_decl(FILE *o, const Stmt *s, int ind) {
         }
         return;
     }
+    if (dt->kind == DT_DICT) {                        /* dict[str,int].cfg → _wd *cfg = _wd_new(ks) */
+        WType kt = wt_base(dt->key), vt = wt_base(dt->val);
+        if (kt == WT_VOID || kt == WT_UNKNOWN || vt == WT_VOID || vt == WT_UNKNOWN)
+            cg_fail("неизвестный тип словаря '%s'", s->as.decl.name);
+        VType v; v.ck = CK_DICT; v.elem = vt; v.key = kt;
+        sym_add(g_loc, &g_nloc, s->as.decl.name, v);
+        indent(o, ind);
+        fprintf(o, "_wd *%s = _wd_new(%d);\n", s->as.decl.name, kt == WT_STR ? 1 : 0);
+        if (s->as.decl.init) {
+            if (s->as.decl.init->kind != EX_DICT)
+                cg_fail("инициализация словаря '%s' ожидает литерал [ключ: значение, ...]", s->as.decl.name);
+            const Expr *d = s->as.decl.init;
+            for (int i = 0; i < d->as.dict.n; i++) {
+                indent(o, ind);
+                fprintf(o, "_wd_set(%s, ", s->as.decl.name);
+                emit_dict_pack(o, kt, d->as.dict.keys[i], 1);
+                fputs(", ", o);
+                emit_dict_pack(o, vt, d->as.dict.vals[i], 1);
+                fputs(");\n", o);
+            }
+        }
+        return;
+    }
     WType t;
     if (dt->kind == DT_INFER)        t = infer(s->as.decl.init);
     else if (dt->kind == DT_SCALAR)  t = wt_base(dt->base);
-    else cg_fail("срез 3c: dict-объявления пока не поддержаны");
+    else cg_fail("неизвестный вид объявления");
     if (t == WT_VOID || t == WT_UNKNOWN) cg_fail("не могу вывести тип переменной '%s'", s->as.decl.name);
     sym_add(g_loc, &g_nloc, s->as.decl.name, vt_scalar(t));
     indent(o, ind);
@@ -432,6 +495,18 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
                     emit_expr(o, tgt->as.index.coll); fputs(", ", o);
                     emit_expr(o, tgt->as.index.idx);  fputs(", ", o);
                     emit_expr(o, s->as.assign.value); fputs(");\n", o);
+                    break;
+                }
+                if (cv.ck == CK_DICT) {
+                    if (s->as.assign.op != TK_ASSIGN)
+                        cg_fail("словарь: для элемента поддержано только '=' (не +=)");
+                    indent(o, ind);
+                    fputs("_wd_set(", o);
+                    emit_expr(o, tgt->as.index.coll); fputs(", ", o);
+                    emit_dict_pack(o, cv.key, tgt->as.index.idx, 1);
+                    fputs(", ", o);
+                    emit_dict_pack(o, cv.elem, s->as.assign.value, 1);
+                    fputs(");\n", o);
                     break;
                 }
             }
@@ -492,21 +567,40 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
             emit_print(o, s->as.output.value, ind);
             break;
         }
-        case ST_LOOP: {                              /* loop v in <список> ... end */
+        case ST_LOOP: {                              /* loop v in <список|словарь> ... end */
             VType cv = coll_vtype(s->as.loopl.coll);
-            if (cv.ck != CK_LIST) cg_fail("loop..in пока поддержан только по спискам");
             int id = g_rep_id++;
-            indent(o, ind);
-            fprintf(o, "for (int __it%d = 0; __it%d < _wl_len(", id, id);
-            emit_expr(o, s->as.loopl.coll);
-            fprintf(o, "); __it%d++) {\n", id);
-            indent(o, ind + 1);
-            fprintf(o, "%s %s = _wl_get_%s(", ctype(cv.elem), s->as.loopl.var, list_suffix(cv.elem));
-            emit_expr(o, s->as.loopl.coll);
-            fprintf(o, ", __it%d);\n", id);
-            sym_add(g_loc, &g_nloc, s->as.loopl.var, vt_scalar(cv.elem));  /* видна в теле */
-            emit_block(o, &s->as.loopl.body, ind + 1);
-            indent(o, ind); fputs("}\n", o);
+            if (cv.ck == CK_LIST) {
+                indent(o, ind);
+                fprintf(o, "for (int __it%d = 0; __it%d < _wl_len(", id, id);
+                emit_expr(o, s->as.loopl.coll);
+                fprintf(o, "); __it%d++) {\n", id);
+                indent(o, ind + 1);
+                fprintf(o, "%s %s = _wl_get_%s(", ctype(cv.elem), s->as.loopl.var, list_suffix(cv.elem));
+                emit_expr(o, s->as.loopl.coll);
+                fprintf(o, ", __it%d);\n", id);
+                sym_add(g_loc, &g_nloc, s->as.loopl.var, vt_scalar(cv.elem));
+                emit_block(o, &s->as.loopl.body, ind + 1);
+                indent(o, ind); fputs("}\n", o);
+            } else if (cv.ck == CK_DICT) {           /* итерируем по ключам */
+                indent(o, ind);
+                fprintf(o, "for (int __b%d = 0; __b%d < (", id, id);
+                emit_expr(o, s->as.loopl.coll);
+                fprintf(o, ")->nb; __b%d++)\n", id);
+                indent(o, ind + 1);
+                fprintf(o, "for (_wde *__e%d = (", id);
+                emit_expr(o, s->as.loopl.coll);
+                fprintf(o, ")->b[__b%d]; __e%d; __e%d = __e%d->next) {\n", id, id, id, id);
+                indent(o, ind + 2);
+                fprintf(o, "%s %s = ", ctype(cv.key), s->as.loopl.var);
+                emit_unpack_open(o, cv.key);
+                fprintf(o, "__e%d->key);\n", id);
+                sym_add(g_loc, &g_nloc, s->as.loopl.var, vt_scalar(cv.key));
+                emit_block(o, &s->as.loopl.body, ind + 2);
+                indent(o, ind + 1); fputs("}\n", o);
+            } else {
+                cg_fail("loop..in поддержан по спискам и словарям");
+            }
             break;
         }
         case ST_EXPR:
@@ -578,7 +672,7 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap) {
 
     /* преамбула */
     fputs("/* Сгенерировано Wind AST-кодогеном (этап 4, срезы 1-3a) */\n", out);
-    fputs("#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdarg.h>\n\n", out);
+    fputs("#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdarg.h>\n#include <stdint.h>\n\n", out);
     fputs("__attribute__((unused)) static char *wstr_cat(const char *a, const char *b){\n"
           "    size_t la=strlen(a), lb=strlen(b);\n"
           "    char *r=malloc(la+lb+1); memcpy(r,a,la); memcpy(r+la,b,lb+1); return r;\n}\n"
@@ -616,6 +710,20 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap) {
           "__attribute__((unused)) static void _wl_set_str(_wl *l,int i,char *v){ _wl_oob(l,i); ((char**)l->data)[i]=v; }\n"
           "__attribute__((unused)) static int  _wl_len(_wl *l){ return l->len; }\n"
           "__attribute__((unused)) static void _wl_pop(_wl *l){ if(l->len>0) l->len--; }\n\n", out);
+
+    /* рантайм словарей (хеш-таблица с цепочками; ключи/значения упакованы в uint64) */
+    fputs("typedef struct _wde { struct _wde *next; uint64_t key; uint64_t val; } _wde;\n"
+          "typedef struct { _wde **b; int nb; int count; int ks; } _wd;\n"
+          "__attribute__((unused)) static char *wstr_dup(const char *s){ size_t n=strlen(s)+1; char *r=malloc(n); memcpy(r,s,n); return r; }\n"
+          "__attribute__((unused)) static uint64_t _wd_packf(double d){ uint64_t u; memcpy(&u,&d,8); return u; }\n"
+          "__attribute__((unused)) static double _wd_unpackf(uint64_t u){ double d; memcpy(&d,&u,8); return d; }\n"
+          "__attribute__((unused)) static _wd *_wd_new(int ks){ _wd *d=malloc(sizeof *d); d->nb=16; d->b=calloc((size_t)d->nb,sizeof(_wde*)); d->count=0; d->ks=ks; return d; }\n"
+          "__attribute__((unused)) static uint64_t _wd_h(_wd *d,uint64_t k){ if(d->ks){ const char*s=(const char*)(uintptr_t)k; uint64_t h=1469598103934665603ULL; while(*s){ h^=(unsigned char)*s++; h*=1099511628211ULL; } return h; } return k*1099511628211ULL+1234567ULL; }\n"
+          "__attribute__((unused)) static int _wd_eq(_wd *d,uint64_t a,uint64_t b){ if(d->ks) return strcmp((const char*)(uintptr_t)a,(const char*)(uintptr_t)b)==0; return a==b; }\n"
+          "__attribute__((unused)) static void _wd_set(_wd *d,uint64_t k,uint64_t v){ uint64_t i=_wd_h(d,k)%(uint64_t)d->nb; for(_wde*e=d->b[i];e;e=e->next) if(_wd_eq(d,e->key,k)){ e->val=v; return; } _wde*e=malloc(sizeof*e); e->key=k; e->val=v; e->next=d->b[i]; d->b[i]=e; d->count++; }\n"
+          "__attribute__((unused)) static uint64_t _wd_get(_wd *d,uint64_t k){ uint64_t i=_wd_h(d,k)%(uint64_t)d->nb; for(_wde*e=d->b[i];e;e=e->next) if(_wd_eq(d,e->key,k)) return e->val; fprintf(stderr,\"dict: key not found\\n\"); exit(1); }\n"
+          "__attribute__((unused)) static int _wd_has(_wd *d,uint64_t k){ uint64_t i=_wd_h(d,k)%(uint64_t)d->nb; for(_wde*e=d->b[i];e;e=e->next) if(_wd_eq(d,e->key,k)) return 1; return 0; }\n"
+          "__attribute__((unused)) static int _wd_len(_wd *d){ return d->count; }\n\n", out);
 
     /* forward-декларации функций (рекурсия/взаимные вызовы) */
     for (int i = 0; i < p->body.n; i++)
