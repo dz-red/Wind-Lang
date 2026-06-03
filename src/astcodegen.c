@@ -492,13 +492,30 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
             emit_print(o, s->as.output.value, ind);
             break;
         }
+        case ST_LOOP: {                              /* loop v in <список> ... end */
+            VType cv = coll_vtype(s->as.loopl.coll);
+            if (cv.ck != CK_LIST) cg_fail("loop..in пока поддержан только по спискам");
+            int id = g_rep_id++;
+            indent(o, ind);
+            fprintf(o, "for (int __it%d = 0; __it%d < _wl_len(", id, id);
+            emit_expr(o, s->as.loopl.coll);
+            fprintf(o, "); __it%d++) {\n", id);
+            indent(o, ind + 1);
+            fprintf(o, "%s %s = _wl_get_%s(", ctype(cv.elem), s->as.loopl.var, list_suffix(cv.elem));
+            emit_expr(o, s->as.loopl.coll);
+            fprintf(o, ", __it%d);\n", id);
+            sym_add(g_loc, &g_nloc, s->as.loopl.var, vt_scalar(cv.elem));  /* видна в теле */
+            emit_block(o, &s->as.loopl.body, ind + 1);
+            indent(o, ind); fputs("}\n", o);
+            break;
+        }
         case ST_EXPR:
             indent(o, ind);
             emit_expr(o, s->as.expr.expr);
             fputs(";\n", o);
             break;
         default:
-            cg_fail("срез 3: эта инструкция (loop/try/http.serve) пока не поддержана");
+            cg_fail("срез 3c: эта инструкция (try/http.serve) пока не поддержана");
     }
 }
 
