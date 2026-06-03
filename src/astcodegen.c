@@ -156,6 +156,7 @@ static WType infer(const Expr *e) {
 /* ---------- эмиссия выражений ---------- */
 static void emit_expr(FILE *o, const Expr *e);
 
+
 /* экранирование тела C-строки (без обрамляющих кавычек); dbl_pct — удваивать '%' */
 static void emit_c_chars(FILE *o, const char *s, int dbl_pct) {
     for (const char *p = s ? s : ""; *p; p++) {
