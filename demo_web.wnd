@@ -1,1 +1,36 @@
-terminal.paste -> "Hello, World!"
+// Stateful веб-приложение на упрощённом синтаксисе //
+
+global int.counter = 0
+global int.total_clicks = 0
+global str.last_action = "никаких ещё"
+
+func wrap(str.title, str.content) -> str
+    dict[str, str].v = ["TITLE": title, "CONTENT": content]
+    return render("templates/base.html", v)
+end
+
+func home() -> str
+    dict[str, str].v = ["COUNT": to_str(counter), "TOTAL": to_str(total_clicks), "LAST": last_action]
+    str.inner = render("templates/counter.html", v)
+    return wrap("Счётчик", inner)
+end
+
+func click() -> str
+    counter += 1
+    total_clicks += 1
+    last_action = "+1"
+    return redirect("/")
+end
+
+func reset_counter() -> str
+    counter = 0
+    total_clicks += 1
+    last_action = "сброс"
+    return redirect("/")
+end
+
+http.serve 8080
+    on "/" -> home
+    on "/click" -> click
+    on "/reset" -> reset_counter
+end
