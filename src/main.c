@@ -11,6 +11,9 @@
 #include "errors.h"
 #include "util.h"
 #include "parser.h"
+#include "lexer.h"
+#include "astparse.h"
+#include "astcodegen.h"
 
 #define MAX_LINE 1024
 
@@ -41,11 +44,16 @@ int main(int argc, char *argv[]) {
     /* Разбор аргументов. Очень простой — нам нужен один опциональный флаг -s
      * и одно имя файла. Усложнять (getopt) пока не нужно. */
     int run_after = 0;
+    int mode_ast = 0, mode_build = 0;
     const char *input = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--start") == 0) {
             run_after = 1;
+        } else if (strcmp(argv[i], "--ast") == 0) {
+            mode_ast = 1;
+        } else if (strcmp(argv[i], "--build") == 0) {
+            mode_build = 1;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_help(argv[0]);
             return 0;
@@ -67,6 +75,48 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     current_file = input;
+
+    /* ===== AST-пайплайн (этап 4): --ast печатает дерево, --build кодогенерит ===== */
+    if (mode_ast || mode_build) {
+        FILE *f = fopen(input, "rb");
+        if (!f) { fprintf(stderr, C_RED "[ERROR]" C_RST " cannot open file: %s\n", input); return 1; }
+        fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+        char *src = (char *)malloc((size_t)(sz < 0 ? 0 : sz) + 1);
+        if (!src) { fclose(f); fprintf(stderr, "malloc failed\n"); return 1; }
+        size_t rd = fread(src, 1, (size_t)(sz < 0 ? 0 : sz), f); src[rd] = '\0'; fclose(f);
+
+        int ntok = 0;
+        Token *toks = wind_lex(src, &ntok);
+        Program prog;
+        char errbuf[256]; int eline = 0, ecol = 0;
+        if (!wind_parse(toks, ntok, &prog, errbuf, sizeof errbuf, &eline, &ecol)) {
+            fprintf(stderr, C_RED "[parse error]" C_RST " %s:%d:%d: %s\n", input, eline, ecol, errbuf);
+            wind_tokens_free(toks, ntok); free(src);
+            return 1;
+        }
+
+        if (mode_ast) {
+            ast_dump_program(&prog, stdout);
+            ast_free_program(&prog); wind_tokens_free(toks, ntok); free(src);
+            return 0;
+        }
+
+        /* mode_build: AST → output_ast.c → gcc → ./app2 */
+        FILE *o = fopen("output_ast.c", "w");
+        if (!o) { fprintf(stderr, C_RED "[ERROR]" C_RST " cannot create output_ast.c\n"); return 1; }
+        char cgerr[256];
+        int ok = wind_codegen(&prog, o, cgerr, sizeof cgerr);
+        fclose(o);
+        ast_free_program(&prog); wind_tokens_free(toks, ntok); free(src);
+        if (!ok) { fprintf(stderr, C_RED "[codegen error]" C_RST " %s\n", cgerr); return 1; }
+        fprintf(stderr, "output_ast.c сгенерирован, компилирую gcc...\n");
+        if (system("gcc -O2 -o app2 output_ast.c") != 0) {
+            fprintf(stderr, C_RED "[wind] gcc failed\n" C_RST); return 1;
+        }
+        fprintf(stderr, C_CYN "Готово: ./app2" C_RST " (через AST-пайплайн)\n");
+        if (run_after) { int r = system("./app2"); (void)r; }
+        return 0;
+    }
 
     FILE *in = fopen(input, "r");
     if (!in) {

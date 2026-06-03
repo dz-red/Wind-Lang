@@ -1,0 +1,27 @@
+global int count = 0
+global str last = "ещё не трогали"
+
+func wrap(str title, str content) str
+    var v = ["TITLE": title, "CONTENT": content]
+    return render("templates/base.html", v)
+end
+
+func home() str
+    return wrap("Главная", render("templates/home.html", [
+        "TIME": shell("date"),
+        "HOST": shell("hostname")
+    ]))
+end
+
+func counter() str
+    return wrap("Счётчик", render("templates/counter.html", [
+        "COUNT": count,
+        "LAST": last
+    ]))
+end
+
+http.serve 8080
+    on "/"        -> home
+    on "/counter" -> counter
+    on "/api/info" -> json.encode(["name": "Wind Backend", "host": shell("hostname")])
+end
