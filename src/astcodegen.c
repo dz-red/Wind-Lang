@@ -88,6 +88,15 @@ static const char *ctype(WType t) {
         default: cg_fail("неизвестный тип в кодогене"); return "?";
     }
 }
+/* суффикс рантайм-функций списка по типу элемента: _wl_get_int/_frac/_str */
+static const char *list_suffix(WType t) {
+    switch (t) {
+        case WT_INT: case WT_BOOL: return "int";
+        case WT_FRAC: return "frac";
+        case WT_STR:  return "str";
+        default: cg_fail("список: неподдержанный тип элемента"); return "?";
+    }
+}
 
 /* ---------- вывод типа выражения ---------- */
 static WType infer(const Expr *e);
@@ -119,13 +128,23 @@ static WType infer(const Expr *e) {
         case EX_UNARY:  return infer(e->as.unary.e);
         case EX_BINARY: return infer_binary(e);
         case EX_INDEX:  return coll_vtype(e->as.index.coll).elem;
+        case EX_DOT: {
+            VType ov = coll_vtype(e->as.dot.obj);
+            if (ov.ck == CK_LIST && !strcmp(e->as.dot.field, "len")) return WT_INT;
+            return WT_UNKNOWN;
+        }
         case EX_CALL: {
             const Expr *c = e->as.call.callee;
             if (c->kind == EX_IDENT) {
                 if (!strcmp(c->as.ident, "int"))  return WT_INT;
                 if (!strcmp(c->as.ident, "frac")) return WT_FRAC;
                 if (!strcmp(c->as.ident, "str") || !strcmp(c->as.ident, "to_str")) return WT_STR;
+                if (!strcmp(c->as.ident, "len")) return WT_INT;
                 return func_ret(c->as.ident);
+            }
+            if (c->kind == EX_DOT) {
+                if (!strcmp(c->as.dot.field, "len")) return WT_INT;
+                return WT_VOID;   /* .add / .pop */
             }
             return WT_UNKNOWN;
         }
@@ -239,9 +258,31 @@ static void emit_expr(FILE *o, const Expr *e) {
         }
         case EX_CALL: {
             const Expr *c = e->as.call.callee;
+            /* методы списка: nums.add(v) / nums.pop() / nums.len() */
+            if (c->kind == EX_DOT) {
+                const Expr *obj = c->as.dot.obj;
+                const char *m = c->as.dot.field;
+                VType ov = coll_vtype(obj);
+                if (ov.ck != CK_LIST) cg_fail("метод .%s поддержан только у списков", m);
+                if (!strcmp(m, "add")) {
+                    if (e->as.call.nargs != 1) cg_fail(".add ждёт ровно 1 аргумент");
+                    fprintf(o, "_wl_push_%s(", list_suffix(ov.elem));
+                    emit_expr(o, obj); fputs(", ", o); emit_expr(o, e->as.call.args[0]); fputc(')', o);
+                } else if (!strcmp(m, "pop")) {
+                    fputs("_wl_pop(", o); emit_expr(o, obj); fputc(')', o);
+                } else if (!strcmp(m, "len")) {
+                    fputs("_wl_len(", o); emit_expr(o, obj); fputc(')', o);
+                } else cg_fail("неизвестный метод списка .%s", m);
+                break;
+            }
             if (c->kind != EX_IDENT)
-                cg_fail("срез 2: вызов поддержан только по имени функции (a.b(...) позже)");
+                cg_fail("вызов поддержан по имени функции или как метод списка");
             const char *fn = c->as.ident;
+            /* len(nums) */
+            if (!strcmp(fn, "len") && e->as.call.nargs == 1) {
+                fputs("_wl_len(", o); emit_expr(o, e->as.call.args[0]); fputc(')', o);
+                break;
+            }
             /* касты: str/to_str/int/frac с одним аргументом */
             if (e->as.call.nargs == 1 &&
                 (!strcmp(fn, "str") || !strcmp(fn, "to_str") ||
@@ -272,14 +313,29 @@ static void emit_expr(FILE *o, const Expr *e) {
             fputc(')', o);
             break;
         }
-        case EX_INDEX:                                /* nums[i] / int.nums[i] */
-            emit_expr(o, e->as.index.coll);
-            fputc('[', o);
-            emit_expr(o, e->as.index.idx);
-            fputc(']', o);
+        case EX_INDEX: {                              /* nums[i] — массив (нативно) или список (рантайм) */
+            VType cv = coll_vtype(e->as.index.coll);
+            if (cv.ck == CK_LIST) {
+                fprintf(o, "_wl_get_%s(", list_suffix(cv.elem));
+                emit_expr(o, e->as.index.coll); fputs(", ", o);
+                emit_expr(o, e->as.index.idx); fputc(')', o);
+            } else {
+                emit_expr(o, e->as.index.coll);
+                fputc('[', o); emit_expr(o, e->as.index.idx); fputc(']', o);
+            }
             break;
+        }
+        case EX_DOT: {                                /* nums.len */
+            VType ov = coll_vtype(e->as.dot.obj);
+            if (ov.ck == CK_LIST && !strcmp(e->as.dot.field, "len")) {
+                fputs("_wl_len(", o); emit_expr(o, e->as.dot.obj); fputc(')', o);
+                break;
+            }
+            cg_fail("доступ .%s не поддержан", e->as.dot.field);
+            break;
+        }
         default:
-            cg_fail("срез 3: это выражение (list/dict-литерал) пока не поддержано");
+            cg_fail("срез 3: это выражение (dict-литерал) пока не поддержано");
     }
 }
 
@@ -319,10 +375,30 @@ static void emit_local_decl(FILE *o, const Stmt *s, int ind) {
         fputs("] = {0};\n", o);
         return;
     }
+    if (dt->kind == DT_LIST) {                        /* int.list.nums → _wl *nums = _wl_new(...) */
+        WType el = wt_base(dt->base);
+        if (el == WT_VOID || el == WT_UNKNOWN) cg_fail("неизвестный тип списка '%s'", s->as.decl.name);
+        VType vt; vt.ck = CK_LIST; vt.elem = el; vt.key = WT_UNKNOWN;
+        sym_add(g_loc, &g_nloc, s->as.decl.name, vt);
+        indent(o, ind);
+        fprintf(o, "_wl *%s = _wl_new(sizeof(%s));\n", s->as.decl.name, ctype(el));
+        if (s->as.decl.init) {
+            if (s->as.decl.init->kind != EX_LIST)
+                cg_fail("инициализация списка '%s' ожидает литерал [..]", s->as.decl.name);
+            const Expr *lst = s->as.decl.init;
+            for (int i = 0; i < lst->as.list.n; i++) {
+                indent(o, ind);
+                fprintf(o, "_wl_push_%s(%s, ", list_suffix(el), s->as.decl.name);
+                emit_expr(o, lst->as.list.items[i]);
+                fputs(");\n", o);
+            }
+        }
+        return;
+    }
     WType t;
     if (dt->kind == DT_INFER)        t = infer(s->as.decl.init);
     else if (dt->kind == DT_SCALAR)  t = wt_base(dt->base);
-    else cg_fail("срез 3b/3c: list/dict-объявления пока не поддержаны");
+    else cg_fail("срез 3c: dict-объявления пока не поддержаны");
     if (t == WT_VOID || t == WT_UNKNOWN) cg_fail("не могу вывести тип переменной '%s'", s->as.decl.name);
     sym_add(g_loc, &g_nloc, s->as.decl.name, vt_scalar(t));
     indent(o, ind);
@@ -346,6 +422,19 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
             break;
         case ST_ASSIGN: {
             const Expr *tgt = s->as.assign.target;
+            if (tgt->kind == EX_INDEX) {              /* запись элемента списка через рантайм */
+                VType cv = coll_vtype(tgt->as.index.coll);
+                if (cv.ck == CK_LIST) {
+                    if (s->as.assign.op != TK_ASSIGN)
+                        cg_fail("список: для элемента поддержано только '=' (не +=)");
+                    indent(o, ind);
+                    fprintf(o, "_wl_set_%s(", list_suffix(cv.elem));
+                    emit_expr(o, tgt->as.index.coll); fputs(", ", o);
+                    emit_expr(o, tgt->as.index.idx);  fputs(", ", o);
+                    emit_expr(o, s->as.assign.value); fputs(");\n", o);
+                    break;
+                }
+            }
             if (tgt->kind != EX_IDENT && tgt->kind != EX_TYPED && tgt->kind != EX_INDEX)
                 cg_fail("присваивание поддержано в переменную или элемент a[i]");
             indent(o, ind);
@@ -489,6 +578,27 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap) {
           "    char *r = malloc((size_t)n + 1); memcpy(r, t, (size_t)n + 1); return r;\n}\n"
           "__attribute__((unused)) static long   wstr_to_int(const char *s){ return strtol(s, NULL, 10); }\n"
           "__attribute__((unused)) static double wstr_to_frac(const char *s){ return strtod(s, NULL); }\n\n", out);
+
+    /* рантайм динамических списков */
+    fputs("typedef struct { void *data; int len; int cap; int esz; } _wl;\n"
+          "__attribute__((unused)) static _wl *_wl_new(int esz){\n"
+          "    _wl *l=malloc(sizeof *l); l->data=NULL; l->len=0; l->cap=0; l->esz=esz; return l; }\n"
+          "__attribute__((unused)) static void _wl_grow(_wl *l){\n"
+          "    if(l->len<l->cap) return; int nc=l->cap?l->cap*2:4;\n"
+          "    l->data=realloc(l->data,(size_t)nc*l->esz); l->cap=nc; }\n"
+          "__attribute__((unused)) static void _wl_oob(_wl *l,int i){\n"
+          "    if(i<0||i>=l->len){ fprintf(stderr,\"list index %d out of range (len=%d)\\n\",i,l->len); exit(1);} }\n"
+          "__attribute__((unused)) static void _wl_push_int(_wl *l,int v){ _wl_grow(l); ((int*)l->data)[l->len++]=v; }\n"
+          "__attribute__((unused)) static void _wl_push_frac(_wl *l,double v){ _wl_grow(l); ((double*)l->data)[l->len++]=v; }\n"
+          "__attribute__((unused)) static void _wl_push_str(_wl *l,char *v){ _wl_grow(l); ((char**)l->data)[l->len++]=v; }\n"
+          "__attribute__((unused)) static int    _wl_get_int(_wl *l,int i){ _wl_oob(l,i); return ((int*)l->data)[i]; }\n"
+          "__attribute__((unused)) static double _wl_get_frac(_wl *l,int i){ _wl_oob(l,i); return ((double*)l->data)[i]; }\n"
+          "__attribute__((unused)) static char  *_wl_get_str(_wl *l,int i){ _wl_oob(l,i); return ((char**)l->data)[i]; }\n"
+          "__attribute__((unused)) static void _wl_set_int(_wl *l,int i,int v){ _wl_oob(l,i); ((int*)l->data)[i]=v; }\n"
+          "__attribute__((unused)) static void _wl_set_frac(_wl *l,int i,double v){ _wl_oob(l,i); ((double*)l->data)[i]=v; }\n"
+          "__attribute__((unused)) static void _wl_set_str(_wl *l,int i,char *v){ _wl_oob(l,i); ((char**)l->data)[i]=v; }\n"
+          "__attribute__((unused)) static int  _wl_len(_wl *l){ return l->len; }\n"
+          "__attribute__((unused)) static void _wl_pop(_wl *l){ if(l->len>0) l->len--; }\n\n", out);
 
     /* forward-декларации функций (рекурсия/взаимные вызовы) */
     for (int i = 0; i < p->body.n; i++)
