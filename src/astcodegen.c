@@ -690,6 +690,13 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap) {
 
     /* преамбула */
     fputs("/* Сгенерировано Wind AST-кодогеном (этап 4, срезы 1-3a) */\n", out);
+        fputs("#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdarg.h>\n#include <stdint.h>\n#include <time.h>\n#include <gc.h>\n\n", out);
+    /* Boehm GC: весь malloc/calloc/realloc уходит под сборщик, free — пустышка */
+    fputs("#define malloc(n)    GC_MALLOC(n)\n"
+          "#define calloc(n,m)  GC_MALLOC((size_t)(n)*(size_t)(m))\n"
+          "#define realloc(p,n) GC_REALLOC((p),(n))\n"
+          "#define free(p)      ((void)(p))\n\n", out);
+
     fputs("#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdarg.h>\n#include <stdint.h>\n#include <time.h>\n\n", out);
     fputs("__attribute__((unused)) static char *wstr_cat(const char *a, const char *b){\n"
           "    size_t la=strlen(a), lb=strlen(b);\n"
@@ -781,6 +788,7 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap) {
 
     /* main: сперва инициализация глобалов, потом top-level инструкции */
     fputs("int main(void) {\n", out);
+    fputs("    GC_INIT();\n", out);
     g_nloc = 0;
     for (int i = 0; i < p->body.n; i++) {
         Stmt *s = p->body.items[i];
