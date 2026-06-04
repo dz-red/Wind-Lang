@@ -135,17 +135,23 @@ static WType infer(const Expr *e) {
         }
         case EX_CALL: {
             const Expr *c = e->as.call.callee;
+            if (c->kind == EX_DOT) {
+                const Expr *o2 = c->as.dot.obj;
+                if (o2->kind == EX_IDENT && !strcmp(o2->as.ident, "time")) {
+                    if (!strcmp(c->as.dot.field, "now"))   return WT_INT;
+                    if (!strcmp(c->as.dot.field, "clock")) return WT_FRAC;
+                    return WT_VOID;
+                }
+                if (!strcmp(c->as.dot.field, "len")) return WT_INT;
+                if (!strcmp(c->as.dot.field, "has")) return WT_BOOL;
+                return WT_VOID;   /* .add / .pop */
+            }
             if (c->kind == EX_IDENT) {
                 if (!strcmp(c->as.ident, "int"))  return WT_INT;
                 if (!strcmp(c->as.ident, "frac")) return WT_FRAC;
                 if (!strcmp(c->as.ident, "str") || !strcmp(c->as.ident, "to_str")) return WT_STR;
                 if (!strcmp(c->as.ident, "len")) return WT_INT;
                 return func_ret(c->as.ident);
-            }
-            if (c->kind == EX_DOT) {
-                if (!strcmp(c->as.dot.field, "len")) return WT_INT;
-                if (!strcmp(c->as.dot.field, "has")) return WT_BOOL;
-                return WT_VOID;   /* .add / .pop */
             }
             return WT_UNKNOWN;
         }
@@ -283,6 +289,17 @@ static void emit_expr(FILE *o, const Expr *e) {
             if (c->kind == EX_DOT) {
                 const Expr *obj = c->as.dot.obj;
                 const char *m = c->as.dot.field;
+                /* встроенный модуль time */
+            if (obj->kind == EX_IDENT && !strcmp(obj->as.ident, "time")) {
+                if (!strcmp(m, "now"))   { fputs("_wtime_now()", o); break; }
+                if (!strcmp(m, "clock")) { fputs("_wtime_clock()", o); break; }
+                if (!strcmp(m, "sleep")) {
+                    if (e->as.call.nargs != 1) cg_fail("time.sleep ждёт 1 аргумент");
+                    fputs("_wtime_sleep((double)(", o); emit_expr(o, e->as.call.args[0]); fputs("))", o); break;
+                }
+                cg_fail("у модуля time нет метода .%s", m);
+            }
+
                 VType ov = coll_vtype(obj);
                 if (ov.ck == CK_LIST) {
                     if (!strcmp(m, "add")) {
@@ -673,7 +690,7 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap) {
 
     /* преамбула */
     fputs("/* Сгенерировано Wind AST-кодогеном (этап 4, срезы 1-3a) */\n", out);
-    fputs("#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdarg.h>\n#include <stdint.h>\n\n", out);
+    fputs("#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdarg.h>\n#include <stdint.h>\n#include <time.h>\n\n", out);
     fputs("__attribute__((unused)) static char *wstr_cat(const char *a, const char *b){\n"
           "    size_t la=strlen(a), lb=strlen(b);\n"
           "    char *r=malloc(la+lb+1); memcpy(r,a,la); memcpy(r+la,b,lb+1); return r;\n}\n"
@@ -725,6 +742,15 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap) {
           "__attribute__((unused)) static uint64_t _wd_get(_wd *d,uint64_t k){ uint64_t i=_wd_h(d,k)%(uint64_t)d->nb; for(_wde*e=d->b[i];e;e=e->next) if(_wd_eq(d,e->key,k)) return e->val; fprintf(stderr,\"dict: key not found\\n\"); exit(1); }\n"
           "__attribute__((unused)) static int _wd_has(_wd *d,uint64_t k){ uint64_t i=_wd_h(d,k)%(uint64_t)d->nb; for(_wde*e=d->b[i];e;e=e->next) if(_wd_eq(d,e->key,k)) return 1; return 0; }\n"
           "__attribute__((unused)) static int _wd_len(_wd *d){ return d->count; }\n\n", out);
+    
+    /* рантайм модуля time */
+    fputs("__attribute__((unused)) static long _wtime_now(void){ return (long)time(NULL); }\n"
+          "__attribute__((unused)) static double _wtime_clock(void){\n"
+          "    struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);\n"
+          "    return (double)ts.tv_sec + (double)ts.tv_nsec/1e9; }\n"
+          "__attribute__((unused)) static void _wtime_sleep(double s){\n"
+          "    struct timespec ts; ts.tv_sec=(time_t)s; ts.tv_nsec=(long)((s-(double)ts.tv_sec)*1e9);\n"
+          "    nanosleep(&ts,NULL); }\n\n", out);
 
     /* forward-декларации функций (рекурсия/взаимные вызовы) */
     for (int i = 0; i < p->body.n; i++)

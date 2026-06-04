@@ -1,80 +1,11 @@
-// ===  Wind: шпаргалка по синтаксису, срезы 1-3d  === //
-// Запуск:  ./wind -s --build demo.wnd  (соберёт ./app2 и запустит) //
-// Комментарии в Wind ПАРНЫЕ: открываются и закрываются слешами //
-
-// переменные: точка между типом и именем ОБЯЗАТЕЛЬНА //
-int.age = 27
-frac.pi = 3,14                 // дробь через ЗАПЯТУЮ, не точку //
-var name = "Wind"              // var: тип выводится сам, тут точки нет //
-str.hi = "Привет, " + name + "!"
-
-terminal.paste -> hi
-terminal.paste -> "возраст {int.age}, pi = {frac.pi}"
-
-// функции и рекурсия: у параметров тоже точка //
-func fib(int.n) int
-    if n < 2
-        return n
-    end
-    return fib(n - 1) + fib(n - 2)
-end
-
-terminal.paste -> "fib(10) = {fib(10)}"
-
-// условия //
-if age < 18
-    terminal.paste -> "школьник"
-else if age < 30
-    terminal.paste -> "молодой"
-else
-    terminal.paste -> "взрослый"
-end
-
-// массив фиксированного размера //
-int.squares[5]
+int.t = time.now()
+terminal.paste -> "unix-время: {int.t}"
+frac.a = time.clock()
 int.i = 0
-repeat 5
-    squares[i] = i * i
+repeat 3000000
     i += 1
 end
-terminal.paste -> "квадрат[4] = {int.squares[4]}"
-
-// динамический список и методы //
-int.list.nums = [10, 20, 30]
-nums.add(40)
-nums.add(50)
-terminal.paste -> "в списке {nums.len} чисел, первое = {int.nums[0]}"
-
-// цикл по коллекции (переменная цикла — без типа, без точки) //
-int.total = 0
-loop x in nums
-    total += x
-end
-terminal.paste -> "сумма списка = {int.total}"
-
-// список строк //
-str.list.friends = ["Аня", "Боря", "Вова"]
-loop f in friends
-    terminal.paste -> "привет, {str.f}!"
-end
-
-// касты типов //
-str.s = to_str(age)
-int.back = int("100")
-terminal.paste -> "age строкой: " + s
-terminal.paste -> "back + 1 = {int.back}"
-
-// словарь (хеш-таблица): dict[ключ, значение].имя //
-dict[str, int].ages = ["Аня": 20, "Боря": 25]
-ages["Вова"] = 30
-terminal.paste -> "в словаре {ages.len} записей"
-str.who = "Боря"
-terminal.paste -> ages[who]                    // значение по ключу-переменной //
-loop person in ages
-    terminal.paste -> "есть запись: {str.person}"
-end
-
-// сравнение строк //
-if name == "Wind"
-    terminal.paste -> "язык на месте :)"
-end
+frac.dt = time.clock() - a
+terminal.paste -> "цикл занял {frac.dt} сек"
+time.sleep(0,3)
+terminal.paste -> "поспал 0.3с"
