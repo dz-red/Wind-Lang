@@ -211,7 +211,7 @@ static Expr *parse_interp_placeholder(P *p, const char *inner, int line, int col
 
 /* Строковый литерал: если есть {…} — строим EX_INTERP, иначе EX_STR. */
 static Expr *parse_string_literal(P *p, const char *raw, int line, int col) {
-    if (!raw || !strchr(raw, '{'))
+    if (!raw || (!strchr(raw, '{') && !strchr(raw, '}')))
         return ast_str(dup_s(raw ? raw : ""), line, col);
 
     char **lits = NULL;  int nlit = 0, litcap = 0;
@@ -223,6 +223,8 @@ static Expr *parse_string_literal(P *p, const char *raw, int line, int col) {
     size_t bi = 0;
 
     for (const char *s = raw; *s; ) {
+        if (*s == '{' && s[1] == '{') { buf[bi++] = '{'; s += 2; continue; }  /* {{ → литерал { */
+        if (*s == '}' && s[1] == '}') { buf[bi++] = '}'; s += 2; continue; }  /* }} → литерал } */
         if (*s == '{') {
             const char *close = strchr(s, '}');
             if (!close) { free(buf); p->eline = line; p->ecol = col;
@@ -291,8 +293,12 @@ static Expr *parse_postfix(P *p) {
             e = ast_index(e, idx, lb->line, lb->col);
         } else if (cur(p) == TK_DOT) {
             adv(p);
-            Token *nm = expect(p, TK_IDENT, "field name after '.'");
-            e = ast_dot(e, dup_s(nm->text), e->line, e->col);
+            const char *field;                        /* типы-keyword как имена аксессоров: .int()/.str()/.frac() */
+            if      (cur(p) == TK_KW_INT)  { field = "int";  adv(p); }
+            else if (cur(p) == TK_KW_STR)  { field = "str";  adv(p); }
+            else if (cur(p) == TK_KW_FRAC) { field = "frac"; adv(p); }
+            else field = expect(p, TK_IDENT, "field name after '.'")->text;
+            e = ast_dot(e, dup_s(field), e->line, e->col);
         } else break;
     }
     return e;

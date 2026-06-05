@@ -12,7 +12,7 @@
 #include "astcodegen.h"
 
 /* ---------- типы Wind для вывода ---------- */
-typedef enum { WT_INT, WT_FRAC, WT_STR, WT_VOID, WT_BOOL, WT_UNKNOWN } WType;
+typedef enum { WT_INT, WT_FRAC, WT_STR, WT_VOID, WT_BOOL, WT_JSON, WT_UNKNOWN } WType;
 
 /* Полный тип переменной: скаляр или коллекция. */
 typedef enum { CK_SCALAR, CK_ARRAY, CK_LIST, CK_DICT } CKind;
@@ -84,6 +84,7 @@ static const char *ctype(WType t) {
         case WT_INT: case WT_BOOL: return "int";
         case WT_FRAC: return "double";
         case WT_STR:  return "char*";
+        case WT_JSON: return "_wj*";
         case WT_VOID: return "void";
         default: cg_fail("unknown type in codegen"); return "?";
     }
@@ -146,6 +147,21 @@ static WType infer(const Expr *e) {
                     if (!strcmp(c->as.dot.field, "now"))   return WT_INT;
                     if (!strcmp(c->as.dot.field, "clock")) return WT_FRAC;
                     return WT_VOID;
+                }
+                if (o2->kind == EX_IDENT && !strcmp(o2->as.ident, "json")) {
+                    const char *m = c->as.dot.field;
+                    if (!strcmp(m, "parse") || !strcmp(m, "decode")) return WT_JSON;
+                    if (!strcmp(m, "encode")) return WT_STR;
+                    return WT_UNKNOWN;
+                }
+                if (infer(o2) == WT_JSON) {                 /* аксессоры json-значения */
+                    const char *m = c->as.dot.field;
+                    if (!strcmp(m, "get") || !strcmp(m, "at")) return WT_JSON;
+                    if (!strcmp(m, "str") || !strcmp(m, "type")) return WT_STR;
+                    if (!strcmp(m, "int") || !strcmp(m, "len")) return WT_INT;
+                    if (!strcmp(m, "frac")) return WT_FRAC;
+                    if (!strcmp(m, "bool") || !strcmp(m, "has")) return WT_BOOL;
+                    return WT_UNKNOWN;
                 }
                 if (!strcmp(c->as.dot.field, "len")) return WT_INT;
                 if (!strcmp(c->as.dot.field, "has")) return WT_BOOL;
@@ -310,6 +326,40 @@ static void emit_expr(FILE *o, const Expr *e) {
                 if (!strcmp(m, "write"))  { fputs("_wf_write(", o); emit_expr(o, e->as.call.args[0]); fputs(", ", o); emit_expr(o, e->as.call.args[1]); fputc(')', o); break; }
                 if (!strcmp(m, "append")) { fputs("_wf_append(", o); emit_expr(o, e->as.call.args[0]); fputs(", ", o); emit_expr(o, e->as.call.args[1]); fputc(')', o); break; }
                 cg_fail("module file has no method .%s", m);
+            }
+            if (obj->kind == EX_IDENT && !strcmp(obj->as.ident, "json")) {
+                if ((!strcmp(m, "parse") || !strcmp(m, "decode")) && e->as.call.nargs == 1) {
+                    fputs("_wj_parse(", o); emit_expr(o, e->as.call.args[0]); fputc(')', o); break;
+                }
+                if (!strcmp(m, "encode") && e->as.call.nargs == 1) {
+                    const Expr *a = e->as.call.args[0];
+                    if (infer(a) == WT_JSON) { fputs("_wj_encode(", o); emit_expr(o, a); fputc(')', o); break; }
+                    VType av = coll_vtype(a);
+                    if (av.ck == CK_DICT) {
+                        if (av.key != WT_STR) cg_fail("json.encode: dict keys must be str");
+                        fprintf(o, "_wj_enc_dict_%s(", list_suffix(av.elem));
+                        emit_expr(o, a); fputc(')', o); break;
+                    }
+                    if (av.ck == CK_LIST) {
+                        fprintf(o, "_wj_enc_list_%s(", list_suffix(av.elem));
+                        emit_expr(o, a); fputc(')', o); break;
+                    }
+                    cg_fail("json.encode expects a json value, dict[str,_] or list");
+                }
+                cg_fail("module json has no method .%s", m);
+            }
+            if (infer(obj) == WT_JSON) {                  /* аксессоры json-значения */
+                if (!strcmp(m, "str"))  { fputs("_wj_str(",  o); emit_expr(o, obj); fputc(')', o); break; }
+                if (!strcmp(m, "int"))  { fputs("_wj_int(",  o); emit_expr(o, obj); fputc(')', o); break; }
+                if (!strcmp(m, "frac")) { fputs("_wj_frac(", o); emit_expr(o, obj); fputc(')', o); break; }
+                if (!strcmp(m, "bool")) { fputs("_wj_bool(", o); emit_expr(o, obj); fputc(')', o); break; }
+                if (!strcmp(m, "len"))  { fputs("_wj_len(",  o); emit_expr(o, obj); fputc(')', o); break; }
+                if (!strcmp(m, "type")) { fputs("_wj_type(", o); emit_expr(o, obj); fputc(')', o); break; }
+                if (e->as.call.nargs != 1) cg_fail("json .%s expects exactly 1 argument", m);
+                if (!strcmp(m, "get")) { fputs("_wj_get(", o); emit_expr(o, obj); fputs(", ", o); emit_expr(o, e->as.call.args[0]); fputc(')', o); break; }
+                if (!strcmp(m, "at"))  { fputs("_wj_at(",  o); emit_expr(o, obj); fputs(", ", o); emit_expr(o, e->as.call.args[0]); fputc(')', o); break; }
+                if (!strcmp(m, "has")) { fputs("_wj_has(", o); emit_expr(o, obj); fputs(", ", o); emit_expr(o, e->as.call.args[0]); fputc(')', o); break; }
+                cg_fail("json value has no method .%s", m);
             }
 
                 VType ov = coll_vtype(obj);
@@ -781,6 +831,78 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap) {
           "    FILE *f=fopen(path,\"a\"); if(!f){ fprintf(stderr,\"file.append: cannot open %s\\n\",path); exit(1);} if(t) fputs(t,f); fclose(f); }\n"
           "__attribute__((unused)) static int _wf_exists(const char *path){\n"
           "    FILE *f=fopen(path,\"r\"); if(f){ fclose(f); return 1;} return 0; }\n\n", out);
+
+    /* рантайм модуля json: tagged union + рекурсивный парсер + аксессоры + encode.
+     * Память под GC, поэтому free не нужен. \\u-эскейпы парсятся как литералы (MVP). */
+    fputs(
+      "typedef enum { WJ_NUL,WJ_BOO,WJ_INT,WJ_FRC,WJ_STR,WJ_ARR,WJ_OBJ } _wjt;\n"
+      "typedef struct _wj { _wjt t; long i; double f; char *s; struct _wj **el; char **ky; int n; } _wj;\n"
+      "static _wj *_wj_pv(const char **p);\n"
+      "__attribute__((unused)) static _wj *_wj_mk(_wjt t){ _wj *j=calloc(1,sizeof *j); j->t=t; return j; }\n"
+      "__attribute__((unused)) static void _wj_ws(const char **p){ while(**p==' '||**p=='\\t'||**p=='\\n'||**p=='\\r') (*p)++; }\n"
+      "__attribute__((unused)) static char *_wj_pstr(const char **p){\n"
+      "    (*p)++; size_t cap=16,n=0; char *b=malloc(cap);\n"
+      "    while(**p && **p!='\"'){ char c=**p;\n"
+      "        if(c=='\\\\'){ (*p)++; char e=**p; switch(e){ case 'n':c='\\n';break; case 't':c='\\t';break; case 'r':c='\\r';break; default:c=e; } }\n"
+      "        if(n+1>=cap){ cap*=2; b=realloc(b,cap); }\n"
+      "        b[n++]=c; (*p)++; }\n"
+      "    if(**p=='\"') (*p)++;\n"
+      "    b[n]=0; return b; }\n"
+      "__attribute__((unused)) static _wj *_wj_pv(const char **p){ _wj_ws(p); char c=**p;\n"
+      "    if(c=='\"'){ _wj *j=_wj_mk(WJ_STR); j->s=_wj_pstr(p); return j; }\n"
+      "    if(c=='{'){ (*p)++; _wj *j=_wj_mk(WJ_OBJ); _wj_ws(p); if(**p=='}'){ (*p)++; return j; }\n"
+      "        int cap=4; j->ky=malloc((size_t)cap*sizeof(char*)); j->el=malloc((size_t)cap*sizeof(_wj*));\n"
+      "        for(;;){ _wj_ws(p); char *k=_wj_pstr(p); _wj_ws(p); if(**p==':')(*p)++; _wj *v=_wj_pv(p);\n"
+      "            if(j->n>=cap){ cap*=2; j->ky=realloc(j->ky,(size_t)cap*sizeof(char*)); j->el=realloc(j->el,(size_t)cap*sizeof(_wj*)); }\n"
+      "            j->ky[j->n]=k; j->el[j->n]=v; j->n++; _wj_ws(p);\n"
+      "            if(**p==','){ (*p)++; continue; } if(**p=='}') (*p)++; break; }\n"
+      "        return j; }\n"
+      "    if(c=='['){ (*p)++; _wj *j=_wj_mk(WJ_ARR); _wj_ws(p); if(**p==']'){ (*p)++; return j; }\n"
+      "        int cap=4; j->el=malloc((size_t)cap*sizeof(_wj*));\n"
+      "        for(;;){ _wj *v=_wj_pv(p);\n"
+      "            if(j->n>=cap){ cap*=2; j->el=realloc(j->el,(size_t)cap*sizeof(_wj*)); }\n"
+      "            j->el[j->n++]=v; _wj_ws(p);\n"
+      "            if(**p==','){ (*p)++; continue; } if(**p==']') (*p)++; break; }\n"
+      "        return j; }\n"
+      "    if(c=='t'){ *p+=4; _wj *j=_wj_mk(WJ_BOO); j->i=1; return j; }\n"
+      "    if(c=='f'){ *p+=5; _wj *j=_wj_mk(WJ_BOO); j->i=0; return j; }\n"
+      "    if(c=='n'){ *p+=4; return _wj_mk(WJ_NUL); }\n"
+      "    char *end; double d=strtod(*p,&end); int isf=0;\n"
+      "    for(const char *q=*p;q<end;q++) if(*q=='.'||*q=='e'||*q=='E') isf=1;\n"
+      "    _wj *j; if(isf){ j=_wj_mk(WJ_FRC); j->f=d; } else { j=_wj_mk(WJ_INT); j->i=(long)d; }\n"
+      "    *p=end; return j; }\n"
+      "__attribute__((unused)) static _wj *_wj_parse(const char *s){ const char *p=s; return _wj_pv(&p); }\n", out);
+    fputs(
+      "__attribute__((unused)) static _wj _wj_nul_s = { WJ_NUL,0,0,0,0,0,0 };\n"
+      "__attribute__((unused)) static _wj *_wj_get(_wj *j,const char *k){ if(j&&j->t==WJ_OBJ) for(int i=0;i<j->n;i++) if(!strcmp(j->ky[i],k)) return j->el[i]; return &_wj_nul_s; }\n"
+      "__attribute__((unused)) static _wj *_wj_at(_wj *j,int i){ if(j&&j->t==WJ_ARR&&i>=0&&i<j->n) return j->el[i]; return &_wj_nul_s; }\n"
+      "__attribute__((unused)) static int _wj_has(_wj *j,const char *k){ if(j&&j->t==WJ_OBJ) for(int i=0;i<j->n;i++) if(!strcmp(j->ky[i],k)) return 1; return 0; }\n"
+      "__attribute__((unused)) static long _wj_int(_wj *j){ if(!j) return 0; switch(j->t){ case WJ_INT: case WJ_BOO: return j->i; case WJ_FRC: return (long)j->f; case WJ_STR: return strtol(j->s,0,10); default: return 0; } }\n"
+      "__attribute__((unused)) static double _wj_frac(_wj *j){ if(!j) return 0; switch(j->t){ case WJ_FRC: return j->f; case WJ_INT: case WJ_BOO: return (double)j->i; case WJ_STR: return strtod(j->s,0); default: return 0; } }\n"
+      "__attribute__((unused)) static int _wj_bool(_wj *j){ if(!j) return 0; switch(j->t){ case WJ_BOO: case WJ_INT: return j->i!=0; case WJ_NUL: return 0; default: return 1; } }\n"
+      "__attribute__((unused)) static int _wj_len(_wj *j){ if(!j) return 0; if(j->t==WJ_ARR||j->t==WJ_OBJ) return j->n; if(j->t==WJ_STR) return (int)strlen(j->s); return 0; }\n"
+      "__attribute__((unused)) static char *_wj_type(_wj *j){ static const char *nm[]={\"null\",\"bool\",\"int\",\"frac\",\"str\",\"array\",\"object\"}; return (char*)(j?nm[j->t]:\"null\"); }\n", out);
+    fputs(
+      "typedef struct { char *p; size_t n,cap; } _wjb;\n"
+      "__attribute__((unused)) static void _wjb_ch(_wjb *b,char c){ if(b->n+1>=b->cap){ b->cap=b->cap?b->cap*2:32; b->p=realloc(b->p,b->cap); } b->p[b->n++]=c; }\n"
+      "__attribute__((unused)) static void _wjb_s(_wjb *b,const char *s){ while(*s) _wjb_ch(b,*s++); }\n"
+      "__attribute__((unused)) static void _wjb_q(_wjb *b,const char *s){ _wjb_ch(b,'\"'); for(;*s;s++){ unsigned char c=(unsigned char)*s; switch(c){ case '\"': _wjb_s(b,\"\\\\\\\"\"); break; case '\\\\': _wjb_s(b,\"\\\\\\\\\"); break; case '\\n': _wjb_s(b,\"\\\\n\"); break; case '\\t': _wjb_s(b,\"\\\\t\"); break; case '\\r': _wjb_s(b,\"\\\\r\"); break; default: _wjb_ch(b,(char)c); } } _wjb_ch(b,'\"'); }\n"
+      "__attribute__((unused)) static void _wj_enc(_wjb *b,_wj *j){ char t[64]; if(!j){ _wjb_s(b,\"null\"); return; }\n"
+      "    switch(j->t){ case WJ_NUL: _wjb_s(b,\"null\"); break; case WJ_BOO: _wjb_s(b,j->i?\"true\":\"false\"); break;\n"
+      "        case WJ_INT: snprintf(t,sizeof t,\"%ld\",j->i); _wjb_s(b,t); break;\n"
+      "        case WJ_FRC: snprintf(t,sizeof t,\"%g\",j->f); _wjb_s(b,t); break;\n"
+      "        case WJ_STR: _wjb_q(b,j->s); break;\n"
+      "        case WJ_ARR: _wjb_ch(b,'['); for(int i=0;i<j->n;i++){ if(i)_wjb_ch(b,','); _wj_enc(b,j->el[i]); } _wjb_ch(b,']'); break;\n"
+      "        case WJ_OBJ: _wjb_ch(b,'{'); for(int i=0;i<j->n;i++){ if(i)_wjb_ch(b,','); _wjb_q(b,j->ky[i]); _wjb_ch(b,':'); _wj_enc(b,j->el[i]); } _wjb_ch(b,'}'); break; } }\n"
+      "__attribute__((unused)) static char *_wj_encode(_wj *j){ _wjb b={0,0,0}; _wj_enc(&b,j); _wjb_ch(&b,0); return b.p; }\n"
+      "__attribute__((unused)) static char *_wj_str(_wj *j){ if(!j) return wstr_dup(\"\"); switch(j->t){ case WJ_STR: return j->s; case WJ_INT: return wstr_from_int(j->i); case WJ_BOO: return wstr_dup(j->i?\"true\":\"false\"); case WJ_FRC: return wstr_from_frac(j->f); case WJ_NUL: return wstr_dup(\"null\"); default: return _wj_encode(j); } }\n", out);
+    fputs(
+      "__attribute__((unused)) static char *_wj_enc_dict_str(_wd *d){ _wjb b={0,0,0}; _wjb_ch(&b,'{'); int f=1; for(int i=0;i<d->nb;i++) for(_wde *e=d->b[i];e;e=e->next){ if(!f)_wjb_ch(&b,','); f=0; _wjb_q(&b,(char*)(uintptr_t)e->key); _wjb_ch(&b,':'); _wjb_q(&b,(char*)(uintptr_t)e->val); } _wjb_ch(&b,'}'); _wjb_ch(&b,0); return b.p; }\n"
+      "__attribute__((unused)) static char *_wj_enc_dict_int(_wd *d){ _wjb b={0,0,0}; char t[32]; _wjb_ch(&b,'{'); int f=1; for(int i=0;i<d->nb;i++) for(_wde *e=d->b[i];e;e=e->next){ if(!f)_wjb_ch(&b,','); f=0; _wjb_q(&b,(char*)(uintptr_t)e->key); _wjb_ch(&b,':'); snprintf(t,sizeof t,\"%d\",(int)e->val); _wjb_s(&b,t); } _wjb_ch(&b,'}'); _wjb_ch(&b,0); return b.p; }\n"
+      "__attribute__((unused)) static char *_wj_enc_dict_frac(_wd *d){ _wjb b={0,0,0}; char t[64]; _wjb_ch(&b,'{'); int f=1; for(int i=0;i<d->nb;i++) for(_wde *e=d->b[i];e;e=e->next){ if(!f)_wjb_ch(&b,','); f=0; _wjb_q(&b,(char*)(uintptr_t)e->key); _wjb_ch(&b,':'); snprintf(t,sizeof t,\"%g\",_wd_unpackf(e->val)); _wjb_s(&b,t); } _wjb_ch(&b,'}'); _wjb_ch(&b,0); return b.p; }\n"
+      "__attribute__((unused)) static char *_wj_enc_list_int(_wl *l){ _wjb b={0,0,0}; char t[32]; _wjb_ch(&b,'['); for(int i=0;i<l->len;i++){ if(i)_wjb_ch(&b,','); snprintf(t,sizeof t,\"%d\",((int*)l->data)[i]); _wjb_s(&b,t); } _wjb_ch(&b,']'); _wjb_ch(&b,0); return b.p; }\n"
+      "__attribute__((unused)) static char *_wj_enc_list_frac(_wl *l){ _wjb b={0,0,0}; char t[64]; _wjb_ch(&b,'['); for(int i=0;i<l->len;i++){ if(i)_wjb_ch(&b,','); snprintf(t,sizeof t,\"%g\",((double*)l->data)[i]); _wjb_s(&b,t); } _wjb_ch(&b,']'); _wjb_ch(&b,0); return b.p; }\n"
+      "__attribute__((unused)) static char *_wj_enc_list_str(_wl *l){ _wjb b={0,0,0}; _wjb_ch(&b,'['); for(int i=0;i<l->len;i++){ if(i)_wjb_ch(&b,','); _wjb_q(&b,((char**)l->data)[i]); } _wjb_ch(&b,']'); _wjb_ch(&b,0); return b.p; }\n\n", out);
 
     /* forward-декларации функций (рекурсия/взаимные вызовы) */
     for (int i = 0; i < p->body.n; i++)
