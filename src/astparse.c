@@ -65,7 +65,7 @@ static int accept(P *p, TokenKind k) {
 }
 static Token *expect(P *p, TokenKind k, const char *what) {
     if (cur(p) != k)
-        perr(p, "ожидалось %s, получено %s", what, wind_token_kind_name(cur(p)));
+        perr(p, "expected %s, got %s", what, wind_token_kind_name(cur(p)));
     return adv(p);
 }
 static void skipnl(P *p)   { while (cur(p) == TK_NEWLINE) adv(p); }
@@ -73,7 +73,7 @@ static void skipnl(P *p)   { while (cur(p) == TK_NEWLINE) adv(p); }
 static void expect_eol(P *p) {
     if (cur(p) == TK_NEWLINE) { adv(p); return; }
     if (cur(p) == TK_EOF) return;
-    perr(p, "ожидался конец строки, получено %s", wind_token_kind_name(cur(p)));
+    perr(p, "expected end of line, got %s", wind_token_kind_name(cur(p)));
 }
 /* съесть `end` и всё до конца строки (`end`, `end func`, `end http.serve`...) */
 static void consume_end(P *p) {
@@ -87,7 +87,7 @@ static int is_scalar_type(TokenKind k) {
 }
 static TokenKind expect_scalar_type(P *p, const char *what) {
     if (!is_scalar_type(cur(p)))
-        perr(p, "ожидался тип (%s), получено %s", what, wind_token_kind_name(cur(p)));
+        perr(p, "expected type (%s), got %s", what, wind_token_kind_name(cur(p)));
     return adv(p)->kind;
 }
 
@@ -183,7 +183,7 @@ static void strvec_push(char ***arr, int *n, int *cap, char *s) {
  * (вложенный лексер+парсер). Ошибки внутри {…} пробрасываются наружу. */
 static Expr *parse_interp_placeholder(P *p, const char *inner, int line, int col) {
     while (*inner == ' ' || *inner == '\t') inner++;
-    if (!*inner) { p->eline = line; p->ecol = col; perr(p, "пустые скобки {} в строке"); }
+    if (!*inner) { p->eline = line; p->ecol = col; perr(p, "empty braces {} in string"); }
 
     int nt = 0;
     Token *toks = wind_lex(inner, &nt);
@@ -196,14 +196,14 @@ static Expr *parse_interp_placeholder(P *p, const char *inner, int line, int col
         snprintf(msg, sizeof msg, "%s", sub.err);
         wind_tokens_free(toks, nt);
         p->eline = line; p->ecol = col;
-        perr(p, "в {…}: %s", msg);
+        perr(p, "in {…}: %s", msg);
     }
     Expr *e = parse_expr(&sub);
     if (cur(&sub) != TK_EOF) {
         TokenKind extra = cur(&sub);
         wind_tokens_free(toks, nt);
         p->eline = line; p->ecol = col;
-        perr(p, "лишнее в {…}: %s", wind_token_kind_name(extra));
+        perr(p, "extra tokens in {…}: %s", wind_token_kind_name(extra));
     }
     wind_tokens_free(toks, nt);           /* выражение сделало dup_s текстов — токены не нужны */
     return e;
@@ -226,7 +226,7 @@ static Expr *parse_string_literal(P *p, const char *raw, int line, int col) {
         if (*s == '{') {
             const char *close = strchr(s, '}');
             if (!close) { free(buf); p->eline = line; p->ecol = col;
-                          perr(p, "незакрытая { в строке (нет '}')"); }
+                          perr(p, "unclosed { in string (missing '}')"); }
             buf[bi] = '\0';
             strvec_push(&lits, &nlit, &litcap, dup_s(buf));   /* флашим литерал */
             bi = 0;
@@ -266,13 +266,13 @@ static Expr *parse_primary(P *p) {
                 return ast_call(callee, args, n, t->line, t->col);
             }
             if (accept(p, TK_DOT)) {           /* типизированное имя: int.x */
-                Token *nm = expect(p, TK_IDENT, "имя после тип.");
+                Token *nm = expect(p, TK_IDENT, "name after type.");
                 return ast_typed(ty, dup_s(nm->text), t->line, t->col);
             }
-            perr(p, "после типа ожидалось '.' или '('");
+            perr(p, "expected '.' or '(' after type");
         }
         default:
-            perr(p, "неожиданный токен в выражении: %s", wind_token_kind_name(cur(p)));
+            perr(p, "unexpected token in expression: %s", wind_token_kind_name(cur(p)));
     }
     return NULL; /* недостижимо */
 }
@@ -291,7 +291,7 @@ static Expr *parse_postfix(P *p) {
             e = ast_index(e, idx, lb->line, lb->col);
         } else if (cur(p) == TK_DOT) {
             adv(p);
-            Token *nm = expect(p, TK_IDENT, "имя поля после '.'");
+            Token *nm = expect(p, TK_IDENT, "field name after '.'");
             e = ast_dot(e, dup_s(nm->text), e->line, e->col);
         } else break;
     }
@@ -365,12 +365,12 @@ static Stmt *parse_decl(P *p, int is_global, int line, int col) {
     if (ty == TK_KW_DICT) {
         adv(p);
         expect(p, TK_LBRACKET, "[");
-        TokenKind kty = expect_scalar_type(p, "тип ключа");
+        TokenKind kty = expect_scalar_type(p, "key type");
         expect(p, TK_COMMA, ",");
-        TokenKind vty = expect_scalar_type(p, "тип значения");
+        TokenKind vty = expect_scalar_type(p, "value type");
         expect(p, TK_RBRACKET, "]");
-        expect(p, TK_DOT, "'.' между dict[..] и именем (dict[str,int].cfg)");
-        Token *nm = expect(p, TK_IDENT, "имя dict");
+        expect(p, TK_DOT, "'.' between dict[..] and name (dict[str,int].cfg)");
+        Token *nm = expect(p, TK_IDENT, "dict name");
         Stmt *s = ast_stmt(ST_VAR_DECL, line, col);
         s->as.decl.is_global = is_global;
         s->as.decl.dtype.kind = DT_DICT;
@@ -399,14 +399,14 @@ static Stmt *parse_decl(P *p, int is_global, int line, int col) {
 
     /* scalar / list / array, базовый тип int|frac|str */
     if (!is_scalar_type(ty))
-        perr(p, "ожидался тип объявления, получено %s", wind_token_kind_name(ty));
+        perr(p, "expected declaration type, got %s", wind_token_kind_name(ty));
     adv(p);
-    expect(p, TK_DOT, "'.' между типом и именем (например int.x)");
+    expect(p, TK_DOT, "'.' between type and name (e.g. int.x)");
 
     int is_list = 0;
-    if (cur(p) == TK_KW_LIST) { adv(p); expect(p, TK_DOT, "'.' после list (int.list.nums)"); is_list = 1; }
+    if (cur(p) == TK_KW_LIST) { adv(p); expect(p, TK_DOT, "'.' after list (int.list.nums)"); is_list = 1; }
 
-    Token *nm = expect(p, TK_IDENT, "имя переменной");
+    Token *nm = expect(p, TK_IDENT, "variable name");
     char *name = dup_s(nm->text);
 
     /* трейлинг [idx]: либо размер массива (decl), либо запись элемента (assign) */
@@ -447,7 +447,7 @@ static Stmt *parse_decl(P *p, int is_global, int line, int col) {
 /* var x = expr — тип выводится в кодогене */
 static Stmt *parse_var(P *p, int line, int col) {
     expect(p, TK_KW_VAR, "var");
-    Token *nm = expect(p, TK_IDENT, "имя переменной");
+    Token *nm = expect(p, TK_IDENT, "variable name");
     expect(p, TK_ASSIGN, "=");
     Stmt *s = ast_stmt(ST_VAR_DECL, line, col);
     s->as.decl.is_global = 0;
@@ -520,7 +520,7 @@ static Stmt *parse_repeat(P *p, int line, int col) {
 
 static Stmt *parse_loop(P *p, int line, int col) {
     expect(p, TK_KW_LOOP, "loop");
-    Token *v = expect(p, TK_IDENT, "имя переменной цикла");
+    Token *v = expect(p, TK_IDENT, "loop variable name");
     expect(p, TK_KW_IN, "in");
     Expr *coll = parse_expr(p); expect_eol(p);
     Block body = parse_block(p);
@@ -532,16 +532,16 @@ static Stmt *parse_loop(P *p, int line, int col) {
 
 static Stmt *parse_func(P *p, int line, int col) {
     expect(p, TK_KW_FUNC, "func");
-    Token *nm = expect(p, TK_IDENT, "имя функции");
+    Token *nm = expect(p, TK_IDENT, "function name");
     expect(p, TK_LPAREN, "(");
     Param *params = NULL; int nparams = 0, cap = 0;
     skipnl(p);
     if (cur(p) != TK_RPAREN) {
         do {
             skipnl(p);
-            TokenKind pty = expect_scalar_type(p, "тип параметра");
-            expect(p, TK_DOT, "'.' между типом и именем параметра (int.x)");
-            Token *pn = expect(p, TK_IDENT, "имя параметра");
+            TokenKind pty = expect_scalar_type(p, "parameter type");
+            expect(p, TK_DOT, "'.' between type and parameter name (int.x)");
+            Token *pn = expect(p, TK_IDENT, "parameter name");
             if (nparams >= cap) {
                 cap = cap ? cap * 2 : 4;
                 params = (Param *)realloc(params, (size_t)cap * sizeof(Param));
@@ -711,7 +711,7 @@ static Stmt *parse_stmt(P *p) {
             return parse_assign_or_expr(p, line, col);
         }
         default:
-            perr(p, "неожиданное начало инструкции: %s", wind_token_kind_name(cur(p)));
+            perr(p, "unexpected statement start: %s", wind_token_kind_name(cur(p)));
     }
     return NULL; /* недостижимо */
 }

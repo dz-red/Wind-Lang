@@ -1,11 +1,9 @@
-int.t = time.now()
-terminal.paste -> "unix-время: {int.t}"
-frac.a = time.clock()
-int.i = 0
-repeat 3000000
-    i += 1
+file.write("/tmp/wtest.txt", "строка раз")
+str.c = file.read("/tmp/wtest.txt")
+terminal.paste -> "читаю: {str.c}"
+file.append("/tmp/wtest.txt", " + строка два")
+str.c2 = file.read("/tmp/wtest.txt")
+terminal.paste -> "после append: {str.c2}"
+if file.exists("/tmp/wtest.txt")
+    terminal.paste -> "файл существует"
 end
-frac.dt = time.clock() - a
-terminal.paste -> "цикл занял {frac.dt} сек"
-time.sleep(0,3)
-terminal.paste -> "поспал 0.3с"

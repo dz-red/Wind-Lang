@@ -109,11 +109,11 @@ int main(int argc, char *argv[]) {
         fclose(o);
         ast_free_program(&prog); wind_tokens_free(toks, ntok); free(src);
         if (!ok) { fprintf(stderr, C_RED "[codegen error]" C_RST " %s\n", cgerr); return 1; }
-        fprintf(stderr, "output_ast.c сгенерирован, компилирую gcc...\n");
+        fprintf(stderr, "output_ast.c generated, invoking gcc...\n");
         if (system("gcc -O2 -o app2 output_ast.c -lgc") != 0) {
             fprintf(stderr, C_RED "[wind] gcc failed\n" C_RST); return 1;
         }
-        fprintf(stderr, C_CYN "Готово: ./app2" C_RST " (через AST-пайплайн)\n");
+        fprintf(stderr, C_CYN "Done: ./app2" C_RST " (via AST pipeline)\n");
         if (run_after) { int r = system("./app2"); (void)r; }
         return 0;
     }

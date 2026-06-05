@@ -41,7 +41,7 @@ static void cg_fail(const char *fmt, ...) {
 
 /* ---------- symtab ---------- */
 static void sym_add(Sym *arr, int *n, const char *name, VType vt) {
-    if (*n >= 256) cg_fail("слишком много переменных");
+    if (*n >= 256) cg_fail("too many variables");
     snprintf(arr[*n].name, sizeof arr[*n].name, "%s", name);
     arr[*n].vt = vt; (*n)++;
 }
@@ -85,7 +85,7 @@ static const char *ctype(WType t) {
         case WT_FRAC: return "double";
         case WT_STR:  return "char*";
         case WT_VOID: return "void";
-        default: cg_fail("неизвестный тип в кодогене"); return "?";
+        default: cg_fail("unknown type in codegen"); return "?";
     }
 }
 /* суффикс рантайм-функций списка по типу элемента: _wl_get_int/_frac/_str */
@@ -94,7 +94,7 @@ static const char *list_suffix(WType t) {
         case WT_INT: case WT_BOOL: return "int";
         case WT_FRAC: return "frac";
         case WT_STR:  return "str";
-        default: cg_fail("список: неподдержанный тип элемента"); return "?";
+        default: cg_fail("list: unsupported element type"); return "?";
     }
 }
 
@@ -137,6 +137,11 @@ static WType infer(const Expr *e) {
             const Expr *c = e->as.call.callee;
             if (c->kind == EX_DOT) {
                 const Expr *o2 = c->as.dot.obj;
+                if (o2->kind == EX_IDENT && !strcmp(o2->as.ident, "file")) {
+                    if (!strcmp(c->as.dot.field, "read"))   return WT_STR;
+                    if (!strcmp(c->as.dot.field, "exists")) return WT_BOOL;
+                    return WT_VOID;
+                }
                 if (o2->kind == EX_IDENT && !strcmp(o2->as.ident, "time")) {
                     if (!strcmp(c->as.dot.field, "now"))   return WT_INT;
                     if (!strcmp(c->as.dot.field, "clock")) return WT_FRAC;
@@ -144,7 +149,7 @@ static WType infer(const Expr *e) {
                 }
                 if (!strcmp(c->as.dot.field, "len")) return WT_INT;
                 if (!strcmp(c->as.dot.field, "has")) return WT_BOOL;
-                return WT_VOID;   /* .add / .pop */
+                return WT_VOID;
             }
             if (c->kind == EX_IDENT) {
                 if (!strcmp(c->as.ident, "int"))  return WT_INT;
@@ -219,7 +224,7 @@ static const char *binop_c(TokenKind op) {
         case TK_LT: return "<";  case TK_GT: return ">";
         case TK_LE: return "<="; case TK_GE: return ">=";
         case TK_AND: return "&&"; case TK_OR: return "||";
-        default: cg_fail("неподдержанный бинарный оператор"); return "?";
+        default: cg_fail("unsupported binary operator"); return "?";
     }
 }
 
@@ -234,7 +239,7 @@ static void emit_expr(FILE *o, const Expr *e) {
             for (int i = 0; i < n; i++) {
                 emit_c_chars(o, e->as.interp.lits[i], 1);
                 const char *spec = interp_spec(infer(e->as.interp.exprs[i]));
-                if (!spec) cg_fail("интерполяция: не определить тип плейсхолдера #%d", i + 1);
+                if (!spec) cg_fail("interpolation: cannot determine type of placeholder #%d", i + 1);
                 fputs(spec, o);
             }
             emit_c_chars(o, e->as.interp.lits[n], 1);
@@ -294,36 +299,43 @@ static void emit_expr(FILE *o, const Expr *e) {
                 if (!strcmp(m, "now"))   { fputs("_wtime_now()", o); break; }
                 if (!strcmp(m, "clock")) { fputs("_wtime_clock()", o); break; }
                 if (!strcmp(m, "sleep")) {
-                    if (e->as.call.nargs != 1) cg_fail("time.sleep ждёт 1 аргумент");
+                    if (e->as.call.nargs != 1) cg_fail("time.sleep expects 1 argument");
                     fputs("_wtime_sleep((double)(", o); emit_expr(o, e->as.call.args[0]); fputs("))", o); break;
                 }
-                cg_fail("у модуля time нет метода .%s", m);
+                cg_fail("module time has no method .%s", m);
+            }
+            if (obj->kind == EX_IDENT && !strcmp(obj->as.ident, "file")) {
+                if (!strcmp(m, "read"))   { fputs("_wf_read(", o); emit_expr(o, e->as.call.args[0]); fputc(')', o); break; }
+                if (!strcmp(m, "exists")) { fputs("_wf_exists(", o); emit_expr(o, e->as.call.args[0]); fputc(')', o); break; }
+                if (!strcmp(m, "write"))  { fputs("_wf_write(", o); emit_expr(o, e->as.call.args[0]); fputs(", ", o); emit_expr(o, e->as.call.args[1]); fputc(')', o); break; }
+                if (!strcmp(m, "append")) { fputs("_wf_append(", o); emit_expr(o, e->as.call.args[0]); fputs(", ", o); emit_expr(o, e->as.call.args[1]); fputc(')', o); break; }
+                cg_fail("module file has no method .%s", m);
             }
 
                 VType ov = coll_vtype(obj);
                 if (ov.ck == CK_LIST) {
                     if (!strcmp(m, "add")) {
-                        if (e->as.call.nargs != 1) cg_fail(".add ждёт ровно 1 аргумент");
+                        if (e->as.call.nargs != 1) cg_fail(".add expects exactly 1 argument");
                         fprintf(o, "_wl_push_%s(", list_suffix(ov.elem));
                         emit_expr(o, obj); fputs(", ", o); emit_expr(o, e->as.call.args[0]); fputc(')', o);
                     } else if (!strcmp(m, "pop")) {
                         fputs("_wl_pop(", o); emit_expr(o, obj); fputc(')', o);
                     } else if (!strcmp(m, "len")) {
                         fputs("_wl_len(", o); emit_expr(o, obj); fputc(')', o);
-                    } else cg_fail("неизвестный метод списка .%s", m);
+                    } else cg_fail("unknown list method .%s", m);
                 } else if (ov.ck == CK_DICT) {
                     if (!strcmp(m, "has")) {
-                        if (e->as.call.nargs != 1) cg_fail(".has ждёт ровно 1 аргумент");
+                        if (e->as.call.nargs != 1) cg_fail(".has expects exactly 1 argument");
                         fputs("_wd_has(", o); emit_expr(o, obj); fputs(", ", o);
                         emit_dict_pack(o, ov.key, e->as.call.args[0], 0); fputc(')', o);
                     } else if (!strcmp(m, "len")) {
                         fputs("_wd_len(", o); emit_expr(o, obj); fputc(')', o);
-                    } else cg_fail("неизвестный метод словаря .%s", m);
-                } else cg_fail("метод .%s поддержан только у списков/словарей", m);
+                    } else cg_fail("unknown dict method .%s", m);
+                } else cg_fail("method .%s is only supported on lists/dicts", m);
                 break;
             }
             if (c->kind != EX_IDENT)
-                cg_fail("вызов поддержан по имени функции или как метод списка");
+                cg_fail("call supported only by function name or list method");
             const char *fn = c->as.ident;
             /* len(nums) */
             if (!strcmp(fn, "len") && e->as.call.nargs == 1) {
@@ -342,7 +354,7 @@ static void emit_expr(FILE *o, const Expr *e) {
                         fputs("wstr_from_int(", o); emit_expr(o, arg); fputc(')', o);
                     } else if (at == WT_FRAC) {
                         fputs("wstr_from_frac(", o); emit_expr(o, arg); fputc(')', o);
-                    } else cg_fail("str(): не могу определить тип аргумента");
+                    } else cg_fail("str(): cannot determine argument type");
                 } else if (!strcmp(fn, "int")) {
                     if (at == WT_STR) { fputs("wstr_to_int(", o); emit_expr(o, arg); fputc(')', o); }
                     else { fputs("(int)(", o); emit_expr(o, arg); fputc(')', o); }
@@ -389,11 +401,11 @@ static void emit_expr(FILE *o, const Expr *e) {
                 fputs("_wd_len(", o); emit_expr(o, e->as.dot.obj); fputc(')', o);
                 break;
             }
-            cg_fail("доступ .%s не поддержан", e->as.dot.field);
+            cg_fail("access .%s is not supported", e->as.dot.field);
             break;
         }
         default:
-            cg_fail("срез 3: это выражение (dict-литерал) пока не поддержано");
+            cg_fail("this expression (dict literal) is not supported yet");
     }
 }
 
@@ -409,7 +421,7 @@ static void emit_print(FILE *o, const Expr *val, int ind) {
         case WT_INT: case WT_BOOL: fmt = "%d"; break;
         case WT_FRAC: fmt = "%g"; break;
         case WT_STR:  fmt = "%s"; break;
-        default: cg_fail("terminal.paste: не могу определить тип значения");
+        default: cg_fail("terminal.paste: cannot determine value type");
                  return;
     }
     indent(o, ind);
@@ -424,7 +436,7 @@ static void emit_local_decl(FILE *o, const Stmt *s, int ind) {
     const DeclType *dt = &s->as.decl.dtype;
     if (dt->kind == DT_ARRAY) {                       /* int.nums[5] → int nums[5] = {0}; */
         WType el = wt_base(dt->base);
-        if (el == WT_VOID || el == WT_UNKNOWN) cg_fail("неизвестный тип массива '%s'", s->as.decl.name);
+        if (el == WT_VOID || el == WT_UNKNOWN) cg_fail("unknown array type '%s'", s->as.decl.name);
         VType vt; vt.ck = CK_ARRAY; vt.elem = el; vt.key = WT_UNKNOWN;
         sym_add(g_loc, &g_nloc, s->as.decl.name, vt);
         indent(o, ind);
@@ -435,14 +447,14 @@ static void emit_local_decl(FILE *o, const Stmt *s, int ind) {
     }
     if (dt->kind == DT_LIST) {                        /* int.list.nums → _wl *nums = _wl_new(...) */
         WType el = wt_base(dt->base);
-        if (el == WT_VOID || el == WT_UNKNOWN) cg_fail("неизвестный тип списка '%s'", s->as.decl.name);
+        if (el == WT_VOID || el == WT_UNKNOWN) cg_fail("unknown list type '%s'", s->as.decl.name);
         VType vt; vt.ck = CK_LIST; vt.elem = el; vt.key = WT_UNKNOWN;
         sym_add(g_loc, &g_nloc, s->as.decl.name, vt);
         indent(o, ind);
         fprintf(o, "_wl *%s = _wl_new(sizeof(%s));\n", s->as.decl.name, ctype(el));
         if (s->as.decl.init) {
             if (s->as.decl.init->kind != EX_LIST)
-                cg_fail("инициализация списка '%s' ожидает литерал [..]", s->as.decl.name);
+                cg_fail("list '%s' initializer expects a [..] literal", s->as.decl.name);
             const Expr *lst = s->as.decl.init;
             for (int i = 0; i < lst->as.list.n; i++) {
                 indent(o, ind);
@@ -456,14 +468,14 @@ static void emit_local_decl(FILE *o, const Stmt *s, int ind) {
     if (dt->kind == DT_DICT) {                        /* dict[str,int].cfg → _wd *cfg = _wd_new(ks) */
         WType kt = wt_base(dt->key), vt = wt_base(dt->val);
         if (kt == WT_VOID || kt == WT_UNKNOWN || vt == WT_VOID || vt == WT_UNKNOWN)
-            cg_fail("неизвестный тип словаря '%s'", s->as.decl.name);
+            cg_fail("unknown dict type '%s'", s->as.decl.name);
         VType v; v.ck = CK_DICT; v.elem = vt; v.key = kt;
         sym_add(g_loc, &g_nloc, s->as.decl.name, v);
         indent(o, ind);
         fprintf(o, "_wd *%s = _wd_new(%d);\n", s->as.decl.name, kt == WT_STR ? 1 : 0);
         if (s->as.decl.init) {
             if (s->as.decl.init->kind != EX_DICT)
-                cg_fail("инициализация словаря '%s' ожидает литерал [ключ: значение, ...]", s->as.decl.name);
+                cg_fail("dict '%s' initializer expects a [key: value, ...] literal", s->as.decl.name);
             const Expr *d = s->as.decl.init;
             for (int i = 0; i < d->as.dict.n; i++) {
                 indent(o, ind);
@@ -479,8 +491,8 @@ static void emit_local_decl(FILE *o, const Stmt *s, int ind) {
     WType t;
     if (dt->kind == DT_INFER)        t = infer(s->as.decl.init);
     else if (dt->kind == DT_SCALAR)  t = wt_base(dt->base);
-    else cg_fail("неизвестный вид объявления");
-    if (t == WT_VOID || t == WT_UNKNOWN) cg_fail("не могу вывести тип переменной '%s'", s->as.decl.name);
+    else cg_fail("unknown declaration kind");
+    if (t == WT_VOID || t == WT_UNKNOWN) cg_fail("cannot infer type of variable '%s'", s->as.decl.name);
     sym_add(g_loc, &g_nloc, s->as.decl.name, vt_scalar(t));
     indent(o, ind);
     fprintf(o, "%s %s", ctype(t), s->as.decl.name);
@@ -492,7 +504,7 @@ static const char *assignop_c(TokenKind op) {
     switch (op) {
         case TK_ASSIGN: return "="; case TK_PLUS_EQ: return "+=";
         case TK_MINUS_EQ: return "-="; case TK_STAR_EQ: return "*=";
-        case TK_SLASH_EQ: return "/="; default: cg_fail("неизвестный оператор присваивания"); return "?";
+        case TK_SLASH_EQ: return "/="; default: cg_fail("unknown assignment operator"); return "?";
     }
 }
 
@@ -507,7 +519,7 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
                 VType cv = coll_vtype(tgt->as.index.coll);
                 if (cv.ck == CK_LIST) {
                     if (s->as.assign.op != TK_ASSIGN)
-                        cg_fail("список: для элемента поддержано только '=' (не +=)");
+                        cg_fail("list: only '=' is supported for elements (not +=)");
                     indent(o, ind);
                     fprintf(o, "_wl_set_%s(", list_suffix(cv.elem));
                     emit_expr(o, tgt->as.index.coll); fputs(", ", o);
@@ -517,7 +529,7 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
                 }
                 if (cv.ck == CK_DICT) {
                     if (s->as.assign.op != TK_ASSIGN)
-                        cg_fail("словарь: для элемента поддержано только '=' (не +=)");
+                        cg_fail("dict: only '=' is supported for elements (not +=)");
                     indent(o, ind);
                     fputs("_wd_set(", o);
                     emit_expr(o, tgt->as.index.coll); fputs(", ", o);
@@ -529,7 +541,7 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
                 }
             }
             if (tgt->kind != EX_IDENT && tgt->kind != EX_TYPED && tgt->kind != EX_INDEX)
-                cg_fail("присваивание поддержано в переменную или элемент a[i]");
+                cg_fail("assignment supported to a variable or element a[i]");
             indent(o, ind);
             emit_expr(o, tgt);
             fprintf(o, " %s ", assignop_c(s->as.assign.op));
@@ -581,7 +593,7 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
             int ok = t->kind == EX_DOT && t->as.dot.obj->kind == EX_IDENT
                      && !strcmp(t->as.dot.obj->as.ident, "terminal")
                      && !strcmp(t->as.dot.field, "paste");
-            if (!ok) cg_fail("из вывода поддержан только terminal.paste");
+            if (!ok) cg_fail("only terminal.paste is supported for output");
             emit_print(o, s->as.output.value, ind);
             break;
         }
@@ -617,7 +629,7 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
                 emit_block(o, &s->as.loopl.body, ind + 2);
                 indent(o, ind + 1); fputs("}\n", o);
             } else {
-                cg_fail("loop..in поддержан по спискам и словарям");
+                cg_fail("loop..in is supported over lists and dicts");
             }
             break;
         }
@@ -627,7 +639,7 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
             fputs(";\n", o);
             break;
         default:
-            cg_fail("срез 3c: эта инструкция (try/http.serve) пока не поддержана");
+            cg_fail("this statement (try/http.serve) is not supported yet");
     }
 }
 
@@ -668,7 +680,7 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap) {
     for (int i = 0; i < p->body.n; i++) {
         Stmt *s = p->body.items[i];
         if (s->kind == ST_FUNC) {
-            if (g_nfunc >= 256) cg_fail("слишком много функций");
+            if (g_nfunc >= 256) cg_fail("too many functions");
             snprintf(g_func[g_nfunc].name, sizeof g_func[g_nfunc].name, "%s", s->as.func.name);
             g_func[g_nfunc].ret = wt_base(s->as.func.ret);
             g_nfunc++;
@@ -677,11 +689,11 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap) {
             VType vt;
             if (dt->kind == DT_ARRAY) {
                 WType el = wt_base(dt->base);
-                if (el == WT_VOID || el == WT_UNKNOWN) cg_fail("неизвестный тип массива-глобала '%s'", s->as.decl.name);
+                if (el == WT_VOID || el == WT_UNKNOWN) cg_fail("unknown global array type '%s'", s->as.decl.name);
                 vt.ck = CK_ARRAY; vt.elem = el; vt.key = WT_UNKNOWN;
             } else {
                 WType t = (dt->kind == DT_INFER) ? infer(s->as.decl.init) : wt_base(dt->base);
-                if (t == WT_VOID || t == WT_UNKNOWN) cg_fail("не вывести тип глобала '%s'", s->as.decl.name);
+                if (t == WT_VOID || t == WT_UNKNOWN) cg_fail("cannot infer type of global '%s'", s->as.decl.name);
                 vt = vt_scalar(t);
             }
             sym_add(g_glob, &g_nglob, s->as.decl.name, vt);
@@ -689,7 +701,7 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap) {
     }
 
     /* преамбула */
-    fputs("/* Сгенерировано Wind AST-кодогеном (этап 4, срезы 1-3a) */\n", out);
+    fputs("/* Generated by Wind AST codegen */\n", out);
         fputs("#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdarg.h>\n#include <stdint.h>\n#include <time.h>\n#include <gc.h>\n\n", out);
     /* Boehm GC: весь malloc/calloc/realloc уходит под сборщик, free — пустышка */
     fputs("#define malloc(n)    GC_MALLOC(n)\n"
@@ -758,6 +770,17 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap) {
           "__attribute__((unused)) static void _wtime_sleep(double s){\n"
           "    struct timespec ts; ts.tv_sec=(time_t)s; ts.tv_nsec=(long)((s-(double)ts.tv_sec)*1e9);\n"
           "    nanosleep(&ts,NULL); }\n\n", out);
+
+    fputs("__attribute__((unused)) static char *_wf_read(const char *path){\n"
+          "    FILE *f=fopen(path,\"rb\"); if(!f){ fprintf(stderr,\"file.read: cannot open %s\\n\",path); exit(1);} \n"
+          "    fseek(f,0,SEEK_END); long sz=ftell(f); fseek(f,0,SEEK_SET); if(sz<0) sz=0;\n"
+          "    char *b=malloc((size_t)sz+1); size_t g=fread(b,1,(size_t)sz,f); b[g]=0; fclose(f); return b; }\n"
+          "__attribute__((unused)) static void _wf_write(const char *path,const char *t){\n"
+          "    FILE *f=fopen(path,\"w\"); if(!f){ fprintf(stderr,\"file.write: cannot open %s\\n\",path); exit(1);} if(t) fputs(t,f); fclose(f); }\n"
+          "__attribute__((unused)) static void _wf_append(const char *path,const char *t){\n"
+          "    FILE *f=fopen(path,\"a\"); if(!f){ fprintf(stderr,\"file.append: cannot open %s\\n\",path); exit(1);} if(t) fputs(t,f); fclose(f); }\n"
+          "__attribute__((unused)) static int _wf_exists(const char *path){\n"
+          "    FILE *f=fopen(path,\"r\"); if(f){ fclose(f); return 1;} return 0; }\n\n", out);
 
     /* forward-декларации функций (рекурсия/взаимные вызовы) */
     for (int i = 0; i < p->body.n; i++)
