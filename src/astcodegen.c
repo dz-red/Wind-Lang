@@ -154,6 +154,11 @@ static WType infer(const Expr *e) {
                     if (!strcmp(m, "encode")) return WT_STR;
                     return WT_UNKNOWN;
                 }
+                if (o2->kind == EX_IDENT && !strcmp(o2->as.ident, "http")) {
+                    const char *m = c->as.dot.field;
+                    if (!strcmp(m, "get") || !strcmp(m, "post")) return WT_STR;
+                    return WT_UNKNOWN;
+                }
                 if (infer(o2) == WT_JSON) {                 /* аксессоры json-значения */
                     const char *m = c->as.dot.field;
                     if (!strcmp(m, "get") || !strcmp(m, "at")) return WT_JSON;
@@ -347,6 +352,15 @@ static void emit_expr(FILE *o, const Expr *e) {
                     cg_fail("json.encode expects a json value, dict[str,_] or list");
                 }
                 cg_fail("module json has no method .%s", m);
+            }
+            if (obj->kind == EX_IDENT && !strcmp(obj->as.ident, "http")) {
+                if (!strcmp(m, "get") && e->as.call.nargs == 1) {
+                    fputs("_wh_get(", o); emit_expr(o, e->as.call.args[0]); fputc(')', o); break;
+                }
+                if (!strcmp(m, "post") && e->as.call.nargs == 2) {
+                    fputs("_wh_post(", o); emit_expr(o, e->as.call.args[0]); fputs(", ", o); emit_expr(o, e->as.call.args[1]); fputc(')', o); break;
+                }
+                cg_fail("module http: bad call .%s (use http.get(url) / http.post(url,body); http.serve is a block)", m);
             }
             if (infer(obj) == WT_JSON) {                  /* аксессоры json-значения */
                 if (!strcmp(m, "str"))  { fputs("_wj_str(",  o); emit_expr(o, obj); fputc(')', o); break; }
@@ -688,8 +702,34 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
             emit_expr(o, s->as.expr.expr);
             fputs(";\n", o);
             break;
+        case ST_HTTP_SERVE: {
+            indent(o, ind);   fputs("{\n", o);
+            indent(o, ind+1); fputs("int _wh_sfd = _wh_listen((int)(", o);
+            emit_expr(o, s->as.serve.port); fputs("));\n", o);
+            indent(o, ind+1); fputs("char _wh_path[2048];\n", o);
+            indent(o, ind+1); fputs("for(;;){\n", o);
+            indent(o, ind+2); fputs("int _wh_cfd = _wh_accept(_wh_sfd, _wh_path, sizeof _wh_path);\n", o);
+            indent(o, ind+2); fputs("if(_wh_cfd < 0) continue;\n", o);
+            indent(o, ind+2); fputs("const char *_wh_body;\n", o);
+            for (int i = 0; i < s->as.serve.nroutes; i++) {
+                const Route *rt = &s->as.serve.routes[i];
+                if (infer(rt->handler) != WT_STR)
+                    cg_fail("http.serve: route handler must produce a str");
+                indent(o, ind+2);
+                fprintf(o, "%sif(strcmp(_wh_path, ", i ? "else " : "");
+                emit_expr(o, rt->path); fputs(")==0) _wh_body = ", o);
+                emit_expr(o, rt->handler); fputs(";\n", o);
+            }
+            indent(o, ind+2);
+            fputs(s->as.serve.nroutes ? "else _wh_body = \"404 Not Found\";\n"
+                                      : "_wh_body = \"404 Not Found\";\n", o);
+            indent(o, ind+2); fputs("_wh_respond(_wh_cfd, _wh_body);\n", o);
+            indent(o, ind+1); fputs("}\n", o);
+            indent(o, ind);   fputs("}\n", o);
+            break;
+        }
         default:
-            cg_fail("this statement (try/http.serve) is not supported yet");
+            cg_fail("this statement is not supported yet");
     }
 }
 
@@ -903,6 +943,56 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap) {
       "__attribute__((unused)) static char *_wj_enc_list_int(_wl *l){ _wjb b={0,0,0}; char t[32]; _wjb_ch(&b,'['); for(int i=0;i<l->len;i++){ if(i)_wjb_ch(&b,','); snprintf(t,sizeof t,\"%d\",((int*)l->data)[i]); _wjb_s(&b,t); } _wjb_ch(&b,']'); _wjb_ch(&b,0); return b.p; }\n"
       "__attribute__((unused)) static char *_wj_enc_list_frac(_wl *l){ _wjb b={0,0,0}; char t[64]; _wjb_ch(&b,'['); for(int i=0;i<l->len;i++){ if(i)_wjb_ch(&b,','); snprintf(t,sizeof t,\"%g\",((double*)l->data)[i]); _wjb_s(&b,t); } _wjb_ch(&b,']'); _wjb_ch(&b,0); return b.p; }\n"
       "__attribute__((unused)) static char *_wj_enc_list_str(_wl *l){ _wjb b={0,0,0}; _wjb_ch(&b,'['); for(int i=0;i<l->len;i++){ if(i)_wjb_ch(&b,','); _wjb_q(&b,((char**)l->data)[i]); } _wjb_ch(&b,']'); _wjb_ch(&b,0); return b.p; }\n\n", out);
+
+    /* рантайм модуля http: raw-сокеты, HTTP/1.0 + Connection: close (без chunked), без TLS.
+     * Буфер ответа собирается через _wjb (из json-рантайма). */
+    fputs(
+      "#include <sys/socket.h>\n#include <netinet/in.h>\n#include <arpa/inet.h>\n#include <netdb.h>\n#include <unistd.h>\n"
+      "__attribute__((unused)) static char *_wh_req(const char *method,const char *url,const char *body){\n"
+      "    const char *u=url; if(!strncmp(u,\"http://\",7)) u+=7;\n"
+      "    char host[256]; int port=80; char path[1024];\n"
+      "    const char *slash=strchr(u,'/'); const char *hostend=slash?slash:(u+strlen(u));\n"
+      "    const char *colon=memchr(u,':',(size_t)(hostend-u));\n"
+      "    size_t hl=(size_t)((colon?colon:hostend)-u); if(hl>=sizeof host) hl=sizeof host-1;\n"
+      "    memcpy(host,u,hl); host[hl]=0; if(colon) port=atoi(colon+1);\n"
+      "    if(slash) snprintf(path,sizeof path,\"%s\",slash); else { path[0]='/'; path[1]=0; }\n"
+      "    struct addrinfo hints; memset(&hints,0,sizeof hints); hints.ai_family=AF_INET; hints.ai_socktype=SOCK_STREAM;\n"
+      "    char ps[16]; snprintf(ps,sizeof ps,\"%d\",port); struct addrinfo *res;\n"
+      "    if(getaddrinfo(host,ps,&hints,&res)){ fprintf(stderr,\"http: cannot resolve %s\\n\",host); exit(1); }\n"
+      "    int fd=socket(res->ai_family,res->ai_socktype,res->ai_protocol);\n"
+      "    if(fd<0||connect(fd,res->ai_addr,res->ai_addrlen)){ fprintf(stderr,\"http: cannot connect %s:%d\\n\",host,port); exit(1); }\n"
+      "    freeaddrinfo(res);\n"
+      "    _wjb rq={0,0,0}; _wjb_s(&rq,method); _wjb_ch(&rq,' '); _wjb_s(&rq,path);\n"
+      "    _wjb_s(&rq,\" HTTP/1.0\\r\\nHost: \"); _wjb_s(&rq,host); _wjb_s(&rq,\"\\r\\nConnection: close\\r\\n\");\n"
+      "    if(body){ char cl[96]; snprintf(cl,sizeof cl,\"Content-Type: application/json\\r\\nContent-Length: %zu\\r\\n\",strlen(body)); _wjb_s(&rq,cl); }\n"
+      "    _wjb_s(&rq,\"\\r\\n\"); if(body) _wjb_s(&rq,body); _wjb_ch(&rq,0);\n"
+      "    size_t total=rq.n-1,sent=0; while(sent<total){ ssize_t w=write(fd,rq.p+sent,total-sent); if(w<=0) break; sent+=(size_t)w; }\n"
+      "    _wjb rs={0,0,0}; char buf[4096]; ssize_t r;\n"
+      "    while((r=read(fd,buf,sizeof buf))>0) for(ssize_t i=0;i<r;i++) _wjb_ch(&rs,buf[i]);\n"
+      "    close(fd); _wjb_ch(&rs,0); if(!rs.p) return wstr_dup(\"\");\n"
+      "    char *sep=strstr(rs.p,\"\\r\\n\\r\\n\"); return wstr_dup(sep?sep+4:rs.p); }\n"
+      "__attribute__((unused)) static char *_wh_get(const char *url){ return _wh_req(\"GET\",url,0); }\n"
+      "__attribute__((unused)) static char *_wh_post(const char *url,const char *body){ return _wh_req(\"POST\",url,body); }\n", out);
+    fputs(
+      "__attribute__((unused)) static int _wh_listen(int port){\n"
+      "    int sfd=socket(AF_INET,SOCK_STREAM,0); if(sfd<0){ perror(\"socket\"); exit(1); }\n"
+      "    int yes=1; setsockopt(sfd,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof yes);\n"
+      "    struct sockaddr_in addr; memset(&addr,0,sizeof addr);\n"
+      "    addr.sin_family=AF_INET; addr.sin_addr.s_addr=INADDR_ANY; addr.sin_port=htons((unsigned short)port);\n"
+      "    if(bind(sfd,(struct sockaddr*)&addr,sizeof addr)<0){ fprintf(stderr,\"http.serve: cannot bind port %d\\n\",port); exit(1); }\n"
+      "    if(listen(sfd,16)<0){ perror(\"listen\"); exit(1); }\n"
+      "    fprintf(stderr,\"http.serve: listening on port %d\\n\",port); return sfd; }\n"
+      "__attribute__((unused)) static int _wh_accept(int sfd,char *path,size_t cap){\n"
+      "    int cfd=accept(sfd,0,0); if(cfd<0) return -1;\n"
+      "    char req[8192]; ssize_t n=read(cfd,req,sizeof req-1); if(n<0) n=0; req[n]=0;\n"
+      "    path[0]='/'; path[1]=0; char *sp=strchr(req,' ');\n"
+      "    if(sp){ char *sp2=strchr(sp+1,' '); if(sp2){ size_t pl=(size_t)(sp2-sp-1); if(pl>=cap) pl=cap-1; memcpy(path,sp+1,pl); path[pl]=0; } }\n"
+      "    return cfd; }\n"
+      "__attribute__((unused)) static void _wh_respond(int cfd,const char *body){\n"
+      "    if(!body) body=\"\";\n"
+      "    char hdr[256]; int hn=snprintf(hdr,sizeof hdr,\"HTTP/1.1 200 OK\\r\\nContent-Type: text/html; charset=utf-8\\r\\nContent-Length: %zu\\r\\nConnection: close\\r\\n\\r\\n\",strlen(body));\n"
+      "    if(write(cfd,hdr,(size_t)hn)>=0){ size_t bl=strlen(body),off=0; while(off<bl){ ssize_t ww=write(cfd,body+off,bl-off); if(ww<=0) break; off+=(size_t)ww; } }\n"
+      "    close(cfd); }\n\n", out);
 
     /* forward-декларации функций (рекурсия/взаимные вызовы) */
     for (int i = 0; i < p->body.n; i++)

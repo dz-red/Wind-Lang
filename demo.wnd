@@ -1,35 +1,14 @@
-// Срез 4b: JSON encode/decode //
+// Срез 4c: HTTP-сервер (raw sockets, без TLS) //
+// запуск: ./wind --build demo.wnd  -> слушает порт 8080, Ctrl-C для выхода //
+// проверка: curl localhost:8080 на путях / /json /time //
+// хендлеры это выражения, вычисляются на КАЖДЫЙ запрос (см. /time) //
 
-// encode: словарь и список в JSON-строку //
-dict[str,int].scores
-scores["alice"] = 90
-scores["bob"] = 85
-str.js = json.encode(scores)
-terminal.paste -> "encode dict: {js}"
+dict[str,str].info
+info["lang"] = "Wind"
+info["slice"] = "4c"
 
-int.list.nums = [10, 20, 30]
-str.jl = json.encode(nums)
-terminal.paste -> "encode list: {jl}"
-
-// round-trip: пишем в файл, читаем, парсим обратно //
-file.write("/tmp/scores.json", js)
-var doc = json.parse(file.read("/tmp/scores.json"))
-int.alice = doc.get("alice").int()
-terminal.paste -> "parse back: alice = {alice}"
-
-// inline-литерал: фигурные скобки экранируются как удвоенные //
-var cfg = json.parse("{{\"name\": \"wind\", \"ver\": 4, \"tags\": [\"c\", \"lang\"], \"meta\": {{\"stable\": true}} }}")
-str.nm = cfg.get("name").str()
-int.vr = cfg.get("ver").int()
-str.tag0 = cfg.get("tags").at(0).str()
-int.tagn = cfg.get("tags").len()
-str.kind = cfg.get("meta").type()
-terminal.paste -> "name={nm} ver={vr} tag0={tag0} tags={tagn} meta-type={kind}"
-
-// отсутствующий ключ возвращает null-узел, не падает //
-str.miss = cfg.get("missing").type()
-terminal.paste -> "missing key type: {miss}"
-
-// ре-сериализация вложенной структуры //
-str.back = json.encode(cfg)
-terminal.paste -> "re-encode: {back}"
+http.serve 8080
+    on "/" -> "<h1>Wind web server</h1><p>routes: /json /time</p>"
+    on "/json" -> json.encode(info)
+    on "/time" -> str(time.now())
+end
