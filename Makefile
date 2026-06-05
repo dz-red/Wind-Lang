@@ -26,6 +26,6 @@ $(TARGET): $(OBJS)
 -include $(DEPS)
 
 clean:
-	rm -f $(TARGET) src/*.o src/*.d output.c app
+	rm -f $(TARGET) src/*.o src/*.d output_ast.c app
 
 .PHONY: clean
