@@ -2,14 +2,14 @@
  * lexer.c — реализация токенизатора Wind.
  *
  * Алгоритм: один проход по src, символ за символом.
- * Состояние — позиция (line/col), флаг "внутри парного // комментария".
+ * Состояние — позиция (line/col).
  * Каждый шаг: пропустить пробелы → распознать токен → emit → продвинуться.
  *
  * Wind-специфика:
  *   - `[` и `]` — отдельные токены (группировка вместо круглых)
  *   - `/%` — остаток (один токен TK_MOD, не / и %)
  *   - `3,14` — запятая внутри числа = десятичный разделитель
- *   - `//` парные комментарии (открыли — игнор до следующего //)
+ *   - построчный и блочный комментарии в стиле C
  *   - Внутри строкового литерала `"..."` все спец-символы пропускаются
  *   - `\n` значимый (TK_NEWLINE), несколько подряд = один токен
  */
@@ -23,6 +23,7 @@
 
 /* === Keyword table — порядок не важен === */
 static const struct { const char *word; TokenKind kind; } KEYWORDS[] = {
+    {"link", TK_KW_LINK},
     {"int",      TK_KW_INT},
     {"frac",     TK_KW_FRAC},
     {"str",      TK_KW_STR},
@@ -67,7 +68,6 @@ typedef struct {
     int pos;        /* индекс в src */
     int line;       /* 1-based */
     int col;        /* 1-based */
-    int in_comment; /* флаг для парных // ... // */
     Token *out;
     int out_count;
     int out_cap;
@@ -228,7 +228,6 @@ Token *wind_lex(const char *src, int *out_count) {
     l.pos = 0;
     l.line = 1;
     l.col = 1;
-    l.in_comment = 0;
     l.out = NULL;
     l.out_count = 0;
     l.out_cap = 0;
@@ -236,13 +235,17 @@ Token *wind_lex(const char *src, int *out_count) {
     int newline_pending = 0;
 
     while (peek(&l)) {
+        /* построчный комментарий: // до конца строки (\n не съедаем) */
         if (peek(&l) == '/' && peek_at(&l, 1) == '/') {
-            l.in_comment = !l.in_comment;
             advance(&l); advance(&l);
+            while (peek(&l) && peek(&l) != '\n') advance(&l);
             continue;
         }
-        if (l.in_comment) {
-            advance(&l);
+        /* блочный комментарий C-стиля до ближайшей закрывающей пары (без вложенности) */
+        if (peek(&l) == '/' && peek_at(&l, 1) == '*') {
+            advance(&l); advance(&l);
+            while (peek(&l) && !(peek(&l) == '*' && peek_at(&l, 1) == '/')) advance(&l);
+            if (peek(&l)) { advance(&l); advance(&l); }
             continue;
         }
         char c = peek(&l);
@@ -446,6 +449,7 @@ const char *wind_token_kind_name(TokenKind kind) {
         case TK_OR:         return "OR";
         case TK_ARROW:      return "ARROW";
         case TK_BAD:        return "BAD";
+        case TK_KW_LINK:    return "KW_LINK";
     }
     return "?";
 }
