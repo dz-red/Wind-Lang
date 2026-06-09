@@ -30,6 +30,9 @@ static const struct { const char *word; TokenKind kind; } KEYWORDS[] = {
     {"list",     TK_KW_LIST},
     {"dict",     TK_KW_DICT},
     {"void",     TK_KW_VOID},
+    {"bool",     TK_KW_BOOL},
+    {"true",     TK_KW_TRUE},
+    {"false",    TK_KW_FALSE},
 
     {"if",       TK_KW_IF},
     {"else",     TK_KW_ELSE},
@@ -402,6 +405,9 @@ const char *wind_token_kind_name(TokenKind kind) {
         case TK_KW_LIST:    return "KW_LIST";
         case TK_KW_DICT:    return "KW_DICT";
         case TK_KW_VOID:    return "KW_VOID";
+        case TK_KW_BOOL:    return "KW_BOOL";
+        case TK_KW_TRUE:    return "KW_TRUE";
+        case TK_KW_FALSE:   return "KW_FALSE";
         case TK_KW_IF:      return "KW_IF";
         case TK_KW_ELSE:    return "KW_ELSE";
         case TK_KW_END:     return "KW_END";

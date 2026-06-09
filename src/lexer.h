@@ -35,6 +35,9 @@ typedef enum {
     TK_KW_LIST,        /* list  */
     TK_KW_DICT,        /* dict  */
     TK_KW_VOID,        /* void  */
+    TK_KW_BOOL,        /* bool  */
+    TK_KW_TRUE,        /* true  → 1 */
+    TK_KW_FALSE,       /* false → 0 */
 
     /* Control flow keywords */
     TK_KW_IF,
@@ -56,8 +59,8 @@ typedef enum {
     TK_KW_GLOBAL,
     TK_KW_VAR,         /* var — объявление с выводом типа */
     TK_KW_CLASS,
-    TK_KW_ON,          /* для http.serve */
-
+    TK_KW_ON,           /* для http.serve */
+    TK_KW_LINK,          /* для подключения Сишных либ */
     /* Пунктуация */
     TK_LPAREN,         /* (  */
     TK_RPAREN,         /* )  */

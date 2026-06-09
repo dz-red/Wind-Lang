@@ -83,7 +83,7 @@ static void consume_end(P *p) {
 }
 
 static int is_scalar_type(TokenKind k) {
-    return k == TK_KW_INT || k == TK_KW_FRAC || k == TK_KW_STR;
+    return k == TK_KW_INT || k == TK_KW_FRAC || k == TK_KW_STR || k == TK_KW_BOOL;
 }
 static TokenKind expect_scalar_type(P *p, const char *what) {
     if (!is_scalar_type(cur(p)))
@@ -165,7 +165,8 @@ static Expr *parse_bracket(P *p) {
 
 static const char *scalar_type_word(TokenKind k) {
     switch (k) { case TK_KW_INT: return "int"; case TK_KW_FRAC: return "frac";
-                 case TK_KW_STR: return "str"; default: return "?"; }
+                 case TK_KW_STR: return "str"; case TK_KW_BOOL: return "bool";
+                 default: return "?"; }
 }
 
 /* ---------- интерполяция строк "...{expr}..." ---------- */
@@ -257,10 +258,12 @@ static Expr *parse_primary(P *p) {
     switch (cur(p)) {
         case TK_INT_LIT:  adv(p); return ast_int(t->ival, t->line, t->col);
         case TK_FRAC_LIT: adv(p); return ast_frac(t->fval, t->line, t->col);
+        case TK_KW_TRUE:  adv(p); return ast_int(1, t->line, t->col);
+        case TK_KW_FALSE: adv(p); return ast_int(0, t->line, t->col);
         case TK_STR_LIT:  adv(p); return parse_string_literal(p, t->text, t->line, t->col);
         case TK_IDENT:    adv(p); return ast_ident(dup_s(t->text), t->line, t->col);
         case TK_LBRACKET: return parse_bracket(p);
-        case TK_KW_INT: case TK_KW_FRAC: case TK_KW_STR: {
+        case TK_KW_INT: case TK_KW_FRAC: case TK_KW_STR: case TK_KW_BOOL: {
             TokenKind ty = cur(p); adv(p);
             if (cur(p) == TK_LPAREN) {         /* каст: int(expr) */
                 int n = 0; Expr **args = parse_args(p, &n);
@@ -698,7 +701,7 @@ static Stmt *parse_stmt(P *p) {
     int line = t->line, col = t->col;
     switch (cur(p)) {
         case TK_KW_GLOBAL: adv(p); return parse_decl(p, 1, line, col);
-        case TK_KW_INT: case TK_KW_FRAC: case TK_KW_STR: case TK_KW_DICT:
+        case TK_KW_INT: case TK_KW_FRAC: case TK_KW_STR: case TK_KW_BOOL: case TK_KW_DICT:
             return parse_decl(p, 0, line, col);
         case TK_KW_VAR:      return parse_var(p, line, col);
         case TK_KW_IF:       return parse_if(p, line, col);
