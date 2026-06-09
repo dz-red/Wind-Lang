@@ -296,10 +296,11 @@ static Expr *parse_postfix(P *p) {
             e = ast_index(e, idx, lb->line, lb->col);
         } else if (cur(p) == TK_DOT) {
             adv(p);
-            const char *field;                        /* типы-keyword как имена аксессоров: .int()/.str()/.frac() */
+            const char *field;                        /* типы-keyword как имена аксессоров: .int()/.str()/.frac()/.bool() */
             if      (cur(p) == TK_KW_INT)  { field = "int";  adv(p); }
             else if (cur(p) == TK_KW_STR)  { field = "str";  adv(p); }
             else if (cur(p) == TK_KW_FRAC) { field = "frac"; adv(p); }
+            else if (cur(p) == TK_KW_BOOL) { field = "bool"; adv(p); }
             else field = expect(p, TK_IDENT, "field name after '.'")->text;
             e = ast_dot(e, dup_s(field), e->line, e->col);
         } else break;

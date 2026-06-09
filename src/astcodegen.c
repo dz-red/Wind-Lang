@@ -169,6 +169,16 @@ static WType infer(const Expr *e) {
                     if (!strcmp(m, "bool") || !strcmp(m, "has")) return WT_BOOL;
                     return WT_UNKNOWN;
                 }
+                {                                          /* касты-методы на скалярах: x.int()/.str()/.frac()/.bool() */
+                    WType st = infer(o2);
+                    if (st == WT_INT || st == WT_FRAC || st == WT_STR || st == WT_BOOL) {
+                        const char *m = c->as.dot.field;
+                        if (!strcmp(m, "int"))  return WT_INT;
+                        if (!strcmp(m, "frac")) return WT_FRAC;
+                        if (!strcmp(m, "str"))  return WT_STR;
+                        if (!strcmp(m, "bool")) return WT_BOOL;
+                    }
+                }
                 if (!strcmp(c->as.dot.field, "len")) return WT_INT;
                 if (!strcmp(c->as.dot.field, "has")) return WT_BOOL;
                 return WT_VOID;
@@ -376,6 +386,28 @@ static void emit_expr(FILE *o, const Expr *e) {
                 if (!strcmp(m, "at"))  { fputs("_wj_at(",  o); emit_expr(o, obj); fputs(", ", o); emit_expr(o, e->as.call.args[0]); fputc(')', o); break; }
                 if (!strcmp(m, "has")) { fputs("_wj_has(", o); emit_expr(o, obj); fputs(", ", o); emit_expr(o, e->as.call.args[0]); fputc(')', o); break; }
                 cg_fail("json value has no method .%s", m);
+            }
+            {                                             /* касты-методы на скалярах: x.int()/.str()/.frac()/.bool() */
+                WType ot = infer(obj);
+                if (ot == WT_INT || ot == WT_FRAC || ot == WT_STR || ot == WT_BOOL) {
+                    if (!strcmp(m, "int")) {
+                        if (ot == WT_STR) { fputs("wstr_to_int(", o); emit_expr(o, obj); fputc(')', o); }
+                        else { fputs("(int)(", o); emit_expr(o, obj); fputc(')', o); }
+                        break;
+                    }
+                    if (!strcmp(m, "frac")) {
+                        if (ot == WT_STR) { fputs("wstr_to_frac(", o); emit_expr(o, obj); fputc(')', o); }
+                        else { fputs("(double)(", o); emit_expr(o, obj); fputc(')', o); }
+                        break;
+                    }
+                    if (!strcmp(m, "str")) {
+                        if (ot == WT_STR) { emit_expr(o, obj); }
+                        else if (ot == WT_FRAC) { fputs("wstr_from_frac(", o); emit_expr(o, obj); fputc(')', o); }
+                        else { fputs("wstr_from_int(", o); emit_expr(o, obj); fputc(')', o); }
+                        break;
+                    }
+                    if (!strcmp(m, "bool")) { fputs("((", o); emit_expr(o, obj); fputs(")!=0)", o); break; }
+                }
             }
 
                 VType ov = coll_vtype(obj);
