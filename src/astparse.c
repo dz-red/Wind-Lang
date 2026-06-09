@@ -210,9 +210,10 @@ static Expr *parse_interp_placeholder(P *p, const char *inner, int line, int col
     return e;
 }
 
-/* Строковый литерал: если есть {…} — строим EX_INTERP, иначе EX_STR. */
+/* Строковый литерал: если есть ${…} — строим EX_INTERP, иначе EX_STR.
+ * Одиночные { } теперь литеральны (JSON/CSS пишутся без экранирования). */
 static Expr *parse_string_literal(P *p, const char *raw, int line, int col) {
-    if (!raw || (!strchr(raw, '{') && !strchr(raw, '}')))
+    if (!raw || !strstr(raw, "${"))
         return ast_str(dup_s(raw ? raw : ""), line, col);
 
     char **lits = NULL;  int nlit = 0, litcap = 0;
@@ -224,20 +225,18 @@ static Expr *parse_string_literal(P *p, const char *raw, int line, int col) {
     size_t bi = 0;
 
     for (const char *s = raw; *s; ) {
-        if (*s == '{' && s[1] == '{') { buf[bi++] = '{'; s += 2; continue; }  /* {{ → литерал { */
-        if (*s == '}' && s[1] == '}') { buf[bi++] = '}'; s += 2; continue; }  /* }} → литерал } */
-        if (*s == '{') {
-            const char *close = strchr(s, '}');
+        if (s[0] == '$' && s[1] == '{') {
+            const char *close = strchr(s + 2, '}');
             if (!close) { free(buf); p->eline = line; p->ecol = col;
-                          perr(p, "unclosed { in string (missing '}')"); }
+                          perr(p, "unclosed ${ in string (missing '}')"); }
             buf[bi] = '\0';
             strvec_push(&lits, &nlit, &litcap, dup_s(buf));   /* флашим литерал */
             bi = 0;
 
-            size_t inner_len = (size_t)(close - s - 1);
+            size_t inner_len = (size_t)(close - (s + 2));
             char *inner = (char *)malloc(inner_len + 1);
             if (!inner) { perror("malloc"); exit(1); }
-            memcpy(inner, s + 1, inner_len); inner[inner_len] = '\0';
+            memcpy(inner, s + 2, inner_len); inner[inner_len] = '\0';
             Expr *ph = parse_interp_placeholder(p, inner, line, col);
             free(inner);
             exprvec_push(&exprs, &nexp, &expcap, ph);
