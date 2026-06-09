@@ -576,6 +576,28 @@ static Stmt *parse_loop(P *p, int line, int col) {
     return s;
 }
 
+static Stmt *parse_for(P *p, int line, int col) {
+    expect(p, TK_KW_FOR, "for");
+    Token *v = expect(p, TK_IDENT, "loop variable name");
+    expect(p, TK_KW_IN, "in");
+    Expr *first = parse_expr(p);
+    if (accept(p, TK_DOTDOT)) {                   /* for i in A..B — диапазон [A, B) */
+        Expr *to = parse_expr(p); expect_eol(p);
+        Block body = parse_block(p);
+        consume_end(p);
+        Stmt *s = ast_stmt(ST_FOR, line, col);
+        s->as.forr.var = dup_s(v->text);
+        s->as.forr.from = first; s->as.forr.to = to; s->as.forr.body = body;
+        return s;
+    }
+    expect_eol(p);                                /* for v in coll — как loop */
+    Block body = parse_block(p);
+    consume_end(p);
+    Stmt *s = ast_stmt(ST_LOOP, line, col);
+    s->as.loopl.var = dup_s(v->text); s->as.loopl.coll = first; s->as.loopl.body = body;
+    return s;
+}
+
 static Stmt *parse_func(P *p, int line, int col) {
     expect(p, TK_KW_FUNC, "func");
     Token *nm = expect(p, TK_IDENT, "function name");
@@ -746,6 +768,7 @@ static Stmt *parse_stmt(P *p) {
         case TK_KW_WHILE:    return parse_while(p, line, col);
         case TK_KW_REPEAT:   return parse_repeat(p, line, col);
         case TK_KW_LOOP:     return parse_loop(p, line, col);
+        case TK_KW_FOR:      return parse_for(p, line, col);
         case TK_KW_FUNC:     return parse_func(p, line, col);
         case TK_KW_RETURN:   return parse_return(p, line, col);
         case TK_KW_TRY:      return parse_try(p, line, col);

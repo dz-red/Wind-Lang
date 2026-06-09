@@ -41,6 +41,7 @@ static const struct { const char *word; TokenKind kind; } KEYWORDS[] = {
     {"repeat",   TK_KW_REPEAT},
     {"while",    TK_KW_WHILE},
     {"loop",     TK_KW_LOOP},
+    {"for",      TK_KW_FOR},
     {"in",       TK_KW_IN},
     {"break",    TK_KW_BREAK},
     {"continue", TK_KW_CONTINUE},
@@ -294,6 +295,10 @@ Token *wind_lex(const char *src, int *out_count) {
             advance(&l); advance(&l);
             emit(&l, simple_tok(&l, TK_ARROW, sl, sc)); continue;
         }
+        if (c == '.' && peek_at(&l, 1) == '.') {
+            advance(&l); advance(&l);
+            emit(&l, simple_tok(&l, TK_DOTDOT, sl, sc)); continue;
+        }
         if (c == '/' && peek_at(&l, 1) == '%') {
             advance(&l); advance(&l);
             emit(&l, simple_tok(&l, TK_MOD, sl, sc)); continue;
@@ -416,6 +421,7 @@ const char *wind_token_kind_name(TokenKind kind) {
         case TK_KW_REPEAT:  return "KW_REPEAT";
         case TK_KW_WHILE:   return "KW_WHILE";
         case TK_KW_LOOP:    return "KW_LOOP";
+        case TK_KW_FOR:     return "KW_FOR";
         case TK_KW_IN:      return "KW_IN";
         case TK_KW_BREAK:   return "KW_BREAK";
         case TK_KW_CONTINUE:return "KW_CONTINUE";
@@ -436,6 +442,7 @@ const char *wind_token_kind_name(TokenKind kind) {
         case TK_RBRACE:     return "RBRACE";
         case TK_COMMA:      return "COMMA";
         case TK_DOT:        return "DOT";
+        case TK_DOTDOT:     return "DOTDOT";
         case TK_COLON:      return "COLON";
         case TK_ASSIGN:     return "ASSIGN";
         case TK_PLUS_EQ:    return "PLUS_EQ";

@@ -681,6 +681,19 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
             indent(o, ind); fputs("}\n", o);
             break;
         }
+        case ST_FOR: {                              /* for i in A..B → for(int i=A; i<B; i++) */
+            const char *v = s->as.forr.var;
+            indent(o, ind);
+            fprintf(o, "for (int %s = (", v);
+            emit_expr(o, s->as.forr.from);
+            fprintf(o, "); %s < (", v);
+            emit_expr(o, s->as.forr.to);
+            fprintf(o, "); %s++) {\n", v);
+            sym_add(g_loc, &g_nloc, v, vt_scalar(WT_INT));
+            emit_block(o, &s->as.forr.body, ind + 1);
+            indent(o, ind); fputs("}\n", o);
+            break;
+        }
         case ST_RETURN:
             indent(o, ind); fputs("return", o);
             if (s->as.ret.value) { fputc(' ', o); emit_expr(o, s->as.ret.value); }

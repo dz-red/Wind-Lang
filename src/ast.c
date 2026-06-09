@@ -162,6 +162,9 @@ void ast_free_stmt(Stmt *s) {
         case ST_LOOP:
             free(s->as.loopl.var); ast_free_expr(s->as.loopl.coll);
             ast_free_block(&s->as.loopl.body); break;
+        case ST_FOR:
+            free(s->as.forr.var); ast_free_expr(s->as.forr.from); ast_free_expr(s->as.forr.to);
+            ast_free_block(&s->as.forr.body); break;
         case ST_FUNC:
             free(s->as.func.name);
             for (int i = 0; i < s->as.func.nparams; i++) free(s->as.func.params[i].name);
@@ -334,6 +337,12 @@ static void dump_stmt(FILE *o, const Stmt *s, int d) {
             fprintf(o, "Loop %s in\n", s->as.loopl.var);
             indent(o, d + 1); fprintf(o, "coll:\n"); dump_expr(o, s->as.loopl.coll, d + 2);
             indent(o, d + 1); fprintf(o, "body:\n"); dump_block(o, &s->as.loopl.body, d + 2);
+            break;
+        case ST_FOR:
+            fprintf(o, "For %s in range\n", s->as.forr.var);
+            indent(o, d + 1); fprintf(o, "from:\n"); dump_expr(o, s->as.forr.from, d + 2);
+            indent(o, d + 1); fprintf(o, "to:\n");   dump_expr(o, s->as.forr.to, d + 2);
+            indent(o, d + 1); fprintf(o, "body:\n"); dump_block(o, &s->as.forr.body, d + 2);
             break;
         case ST_FUNC:
             fprintf(o, "Func %s(", s->as.func.name);

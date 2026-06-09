@@ -95,6 +95,7 @@ typedef enum {
     ST_WHILE,      /* while cond ... end              */
     ST_REPEAT,     /* repeat N ... end                */
     ST_LOOP,       /* loop v in coll ... end          */
+    ST_FOR,        /* for i in 0..N ... end           */
     ST_FUNC,       /* func name(params) -> ret ... end*/
     ST_RETURN,     /* return [expr]                   */
     ST_BREAK,
@@ -116,6 +117,7 @@ struct Stmt {
         struct { Expr *cond; Block body; } whilel;
         struct { Expr *count; Block body; } repeatl;
         struct { char *var; Expr *coll; Block body; } loopl;
+        struct { char *var; Expr *from; Expr *to; Block body; } forr;
         struct { char *name; Param *params; int nparams; TokenKind ret; Block body; } func;
         struct { Expr *value; } ret;                 /* value может быть NULL */
         struct { Block body; char *catch_var; Block catch_b; } tryc;
@@ -126,7 +128,11 @@ struct Stmt {
     } as;
 };
 
-typedef struct { Block body; } Program;
+typedef struct { 
+    Block body; 
+    char *links[32];
+    int nlinks;
+} Program;
 
 /* ======================= КОНСТРУКТОРЫ ======================= */
 

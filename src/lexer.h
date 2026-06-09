@@ -47,6 +47,7 @@ typedef enum {
     TK_KW_REPEAT,
     TK_KW_WHILE,
     TK_KW_LOOP,
+    TK_KW_FOR,
     TK_KW_IN,
     TK_KW_BREAK,
     TK_KW_CONTINUE,
@@ -71,6 +72,7 @@ typedef enum {
     TK_RBRACE,         /* }  */
     TK_COMMA,          /* ,  — НО внутри числа 3,14 это часть TK_FRAC_LIT */
     TK_DOT,            /* .  */
+    TK_DOTDOT,         /* .. (диапазон for i in 0..N) */
     TK_COLON,          /* :  */
 
     /* Присваивания */
