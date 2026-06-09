@@ -28,6 +28,7 @@ static const struct { const char *word; TokenKind kind; } KEYWORDS[] = {
     {"frac",     TK_KW_FRAC},
     {"str",      TK_KW_STR},
     {"list",     TK_KW_LIST},
+    {"array",    TK_KW_ARRAY},
     {"dict",     TK_KW_DICT},
     {"void",     TK_KW_VOID},
     {"bool",     TK_KW_BOOL},
@@ -403,6 +404,7 @@ const char *wind_token_kind_name(TokenKind kind) {
         case TK_KW_FRAC:    return "KW_FRAC";
         case TK_KW_STR:     return "KW_STR";
         case TK_KW_LIST:    return "KW_LIST";
+        case TK_KW_ARRAY:   return "KW_ARRAY";
         case TK_KW_DICT:    return "KW_DICT";
         case TK_KW_VOID:    return "KW_VOID";
         case TK_KW_BOOL:    return "KW_BOOL";

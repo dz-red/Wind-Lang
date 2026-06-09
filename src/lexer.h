@@ -33,6 +33,7 @@ typedef enum {
     TK_KW_FRAC,        /* frac  */
     TK_KW_STR,         /* str   */
     TK_KW_LIST,        /* list  */
+    TK_KW_ARRAY,       /* array */
     TK_KW_DICT,        /* dict  */
     TK_KW_VOID,        /* void  */
     TK_KW_BOOL,        /* bool  */

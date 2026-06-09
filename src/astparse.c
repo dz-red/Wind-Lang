@@ -407,7 +407,43 @@ static Stmt *parse_decl(P *p, int is_global, int line, int col) {
         return s;
     }
 
-    /* scalar / list / array, базовый тип int|frac|str */
+    if (ty == TK_KW_LIST) {                       /* list[int].nums [= [..]] */
+        adv(p);
+        expect(p, TK_LBRACKET, "[");
+        TokenKind ety = expect_scalar_type(p, "list element type");
+        expect(p, TK_RBRACKET, "]");
+        expect(p, TK_DOT, "'.' between list[..] and name (list[int].nums)");
+        Token *nm = expect(p, TK_IDENT, "list name");
+        Stmt *s = ast_stmt(ST_VAR_DECL, line, col);
+        s->as.decl.is_global = is_global;
+        s->as.decl.dtype.kind = DT_LIST;
+        s->as.decl.dtype.base = ety;
+        s->as.decl.name = dup_s(nm->text);
+        if (accept(p, TK_ASSIGN)) s->as.decl.init = parse_expr(p);
+        expect_eol(p);
+        return s;
+    }
+
+    if (ty == TK_KW_ARRAY) {                      /* array[int,5].nums */
+        adv(p);
+        expect(p, TK_LBRACKET, "[");
+        TokenKind ety = expect_scalar_type(p, "array element type");
+        expect(p, TK_COMMA, ",");
+        Expr *size = parse_expr(p);
+        expect(p, TK_RBRACKET, "]");
+        expect(p, TK_DOT, "'.' between array[..] and name (array[int,5].nums)");
+        Token *nm = expect(p, TK_IDENT, "array name");
+        expect_eol(p);
+        Stmt *s = ast_stmt(ST_VAR_DECL, line, col);
+        s->as.decl.is_global = is_global;
+        s->as.decl.dtype.kind = DT_ARRAY;
+        s->as.decl.dtype.base = ety;
+        s->as.decl.dtype.array_size = size;
+        s->as.decl.name = dup_s(nm->text);
+        return s;
+    }
+
+    /* scalar / list / array (старые формы int.list.nums / int.nums[5]), базовый тип int|frac|str|bool */
     if (!is_scalar_type(ty))
         perr(p, "expected declaration type, got %s", wind_token_kind_name(ty));
     adv(p);
@@ -702,7 +738,8 @@ static Stmt *parse_stmt(P *p) {
     int line = t->line, col = t->col;
     switch (cur(p)) {
         case TK_KW_GLOBAL: adv(p); return parse_decl(p, 1, line, col);
-        case TK_KW_INT: case TK_KW_FRAC: case TK_KW_STR: case TK_KW_BOOL: case TK_KW_DICT:
+        case TK_KW_INT: case TK_KW_FRAC: case TK_KW_STR: case TK_KW_BOOL:
+        case TK_KW_DICT: case TK_KW_LIST: case TK_KW_ARRAY:
             return parse_decl(p, 0, line, col);
         case TK_KW_VAR:      return parse_var(p, line, col);
         case TK_KW_IF:       return parse_if(p, line, col);
