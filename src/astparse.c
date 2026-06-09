@@ -561,9 +561,14 @@ static Stmt *parse_func(P *p, int line, int col) {
     }
     skipnl(p);
     expect(p, TK_RPAREN, ")");
-    accept(p, TK_ARROW);                          /* стрелка опциональна: -> str или str */
-    TokenKind ret = TK_KW_VOID;
-    if (is_scalar_type(cur(p)) || cur(p) == TK_KW_VOID) ret = adv(p)->kind;
+    TokenKind ret = TK_KW_VOID;                   /* без стрелки -> void; тип только через -> */
+    if (accept(p, TK_ARROW)) {
+        if (!is_scalar_type(cur(p)) && cur(p) != TK_KW_VOID)
+            perr(p, "expected return type after '->', got %s", wind_token_kind_name(cur(p)));
+        ret = adv(p)->kind;
+    } else if (is_scalar_type(cur(p)) || cur(p) == TK_KW_VOID) {
+        perr(p, "return type requires '->' (e.g. func f() -> str)");
+    }
     expect_eol(p);
     Block body = parse_block(p);
     consume_end(p);
@@ -736,13 +741,39 @@ int wind_parse(Token *toks, int count, Program *out,
         return 0;
     }
 
-    Program prog; prog.body.items = NULL; prog.body.n = 0;
+    Program prog; 
+    prog.body.items = NULL; 
+    prog.body.n = 0;
+    prog.nlinks = 0; // ОБНУЛЯЕМ счётчик либ при старте
+
     skipnl(&p);
     while (cur(&p) != TK_EOF) {
+        // перехватываем директиву линковки на верхнем уровне файла
+        if (cur(&p) == TK_KW_LINK) {
+            adv(&p); // съели 'link'
+            
+            if (cur(&p) != TK_STR_LIT) { // у тебя строковые литералы называются TK_STR_LIT
+                perr(&p, "ожидалась строка с названием библиотеки после 'link'");
+            }
+            
+            Token *t_str = tok(&p);
+            
+            if (prog.nlinks < 32) {
+                prog.links[prog.nlinks++] = dup_s(t_str->text);
+            }
+            
+            adv(&p); // съели строку
+            expect_eol(&p); // проверили конец строки
+            skipnl(&p);
+            continue;
+        }
+
+        // если это не link, то парсим обычную инструкцию/глобалку/функцию
         Stmt *s = parse_stmt(&p);
         if (s) block_push(&prog.body, s);
         skipnl(&p);
     }
+    
     *out = prog;
     return 1;
 }
