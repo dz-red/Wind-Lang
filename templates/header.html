@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Wind backend</title>
+<style>
+:root{--accent:#7c9cff;--accent2:#a979ff;--bg:#0b0e16;--card:rgba(20,25,37,.8);--line:#283248;--text:#e8ecf4;--muted:#8b95a9}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;color:var(--text);font:16px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;
+  background:radial-gradient(900px 500px at 80% -10%,rgba(35,48,90,.45),transparent),
+             radial-gradient(700px 500px at 0% 0%,rgba(58,35,90,.4),transparent),var(--bg)}
+header{padding:18px 26px;border-bottom:1px solid var(--line);backdrop-filter:blur(8px);position:sticky;top:0;z-index:9}
+.brand{font-weight:800;letter-spacing:1px;font-size:18px;
+  background:linear-gradient(90deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
+nav{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+nav a{color:var(--text);text-decoration:none;padding:6px 14px;border:1px solid var(--line);border-radius:999px;font-size:14px;font-weight:600;transition:.15s}
+nav a:hover{border-color:var(--accent);color:var(--accent)}
+main{max-width:760px;margin:44px auto;padding:0 20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:34px;backdrop-filter:blur(12px);box-shadow:0 24px 70px -24px #000}
+h1{margin:0 0 18px;font-size:30px;line-height:1.2}
+p{color:#cdd5e6}
+a.btn{display:inline-block;background:linear-gradient(90deg,var(--accent),var(--accent2));color:#0b0e16;padding:11px 20px;border-radius:12px;text-decoration:none;font-weight:700;margin-top:8px}
+a.btn:hover{filter:brightness(1.08)}
+code{background:#0b0e16;border:1px solid var(--line);padding:3px 8px;border-radius:8px;color:#9ece6a;font-size:14px}
+.big{font-size:48px;font-weight:800;background:linear-gradient(90deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
+.muted{color:var(--muted);font-size:14px}
+footer{color:var(--muted);text-align:center;padding:30px;font-size:13px}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">🌬 WIND</div>
+  <nav><a href="/">Home</a><a href="/count">Counter</a><a href="/api/status">API</a><a href="/api/items">Items</a><a href="/health">Health</a></nav>
+</header>
+<main><div class="card">
