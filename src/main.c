@@ -88,30 +88,26 @@ int main(int argc, char *argv[]) {
     if (!ok) { fprintf(stderr, C_RED "[codegen error]" C_RST " %s\n", cgerr); return 1; }
 
     fprintf(stderr, "output_ast.c generated, assembling gcc command...\n");
-        
-        char gcc_cmd[1024];
-        snprintf(gcc_cmd, sizeof(gcc_cmd), "gcc -O2 -o app output_ast.c -lgc");
 
-        // дописываем все флаги из link "..."
-        for (int i = 0; i < prog.nlinks; i++) {
-            strncat(gcc_cmd, " -l", sizeof(gcc_cmd) - strlen(gcc_cmd) - 1);
-            char *lib = prog.links[i];
-            
-            // убираем кавычки из названия библиотеки
-            if (lib[0] == '"') {
-                size_t len = strlen(lib);
-                if (len >= 2) {
-                    strncat(gcc_cmd, lib + 1, len - 2);
-                }
-            } else {
-                strncat(gcc_cmd, lib, sizeof(gcc_cmd) - strlen(gcc_cmd) - 1);
-            }
-        }
+    char gcc_cmd[1024];
+    snprintf(gcc_cmd, sizeof(gcc_cmd), "gcc -O2 -o app output_ast.c -lgc");
 
-        printf(C_CYN "[wind] invoking: %s" C_RST "\n", gcc_cmd);
-        if (system(gcc_cmd) != 0) {
-            fprintf(stderr, C_RED "[wind] gcc failed\n" C_RST); return 1;
+    /* append a -l flag for each `link "lib"` directive */
+    for (int i = 0; i < prog.nlinks; i++) {
+        char *lib = prog.links[i];
+        strncat(gcc_cmd, " -l", sizeof(gcc_cmd) - strlen(gcc_cmd) - 1);
+        if (lib[0] == '"') {                 /* strip the surrounding quotes */
+            size_t len = strlen(lib);
+            if (len >= 2) strncat(gcc_cmd, lib + 1, len - 2);
+        } else {
+            strncat(gcc_cmd, lib, sizeof(gcc_cmd) - strlen(gcc_cmd) - 1);
         }
+    }
+
+    fprintf(stderr, C_CYN "[wind] %s" C_RST "\n", gcc_cmd);
+    if (system(gcc_cmd) != 0) {
+        fprintf(stderr, C_RED "[wind] gcc failed\n" C_RST); return 1;
+    }
     fprintf(stderr, C_CYN "Done: ./app" C_RST "\n");
     if (run_after) { int r = system("./app"); (void)r; }
     return 0;

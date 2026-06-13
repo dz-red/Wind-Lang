@@ -804,39 +804,35 @@ int wind_parse(Token *toks, int count, Program *out,
         return 0;
     }
 
-    Program prog; 
-    prog.body.items = NULL; 
+    Program prog;
+    prog.body.items = NULL;
     prog.body.n = 0;
-    prog.nlinks = 0; // ОБНУЛЯЕМ счётчик либ при старте
+    prog.nlinks = 0;
 
     skipnl(&p);
     while (cur(&p) != TK_EOF) {
-        // перехватываем директиву линковки на верхнем уровне файла
+        /* top-level `link "lib"` directive: record the library name */
         if (cur(&p) == TK_KW_LINK) {
-            adv(&p); // съели 'link'
-            
-            if (cur(&p) != TK_STR_LIT) { // у тебя строковые литералы называются TK_STR_LIT
-                perr(&p, "ожидалась строка с названием библиотеки после 'link'");
+            adv(&p);
+            if (cur(&p) != TK_STR_LIT) {
+                perr(&p, "expected library name string after 'link', got %s",
+                     wind_token_kind_name(cur(&p)));
             }
-            
             Token *t_str = tok(&p);
-            
             if (prog.nlinks < 32) {
                 prog.links[prog.nlinks++] = dup_s(t_str->text);
             }
-            
-            adv(&p); // съели строку
-            expect_eol(&p); // проверили конец строки
+            adv(&p);
+            expect_eol(&p);
             skipnl(&p);
             continue;
         }
 
-        // если это не link, то парсим обычную инструкцию/глобалку/функцию
         Stmt *s = parse_stmt(&p);
         if (s) block_push(&prog.body, s);
         skipnl(&p);
     }
-    
+
     *out = prog;
     return 1;
 }
