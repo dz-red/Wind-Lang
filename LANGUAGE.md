@@ -1,561 +1,414 @@
-# Wind Language — Полная Шпаргалка
+# Wind — справочник по языку
 
-**Wind** — собственный язык программирования, транспилируется в C, компилируется системным `gcc`. Цель: убийца Python, но с нативной скоростью и строгой типизацией.
+Каждый пример в этом файле прогнан через компилятор, вывод под примерами настоящий.
 
-- Расширение файлов: `.wnd`
-- Компилятор: `./wind` (написан на чистом Си, ~3500 строк)
-- Сборка вашего кода: `./wind file.wnd` → создаёт бинарник `./app`
-- Сборка + запуск: `./wind -s file.wnd`
+## Быстрый старт
 
----
+```sh
+make                    # собрать компилятор ./wind
+./wind file.wnd         # собрать программу в ./app
+./wind -s file.wnd      # собрать и сразу запустить
+./wind --ast file.wnd   # посмотреть дерево разбора
+```
 
-## Содержание
+Зависимости: `gcc`, `make`, `libgc` (Boehm GC), `libcurl`.
 
-1. [Базовый синтаксис](#базовый-синтаксис)
-2. [Ввод и вывод](#ввод-и-вывод)
-3. [Управление потоком](#управление-потоком)
-4. [Функции](#функции)
-5. [Массивы (static)](#статические-массивы)
-6. [Списки (list)](#динамические-списки-list)
-7. [Словари (dict)](#словари-dict)
-8. [Строковые операции](#строковые-операции)
-9. [Математика](#математика)
-10. [Работа с файлами](#работа-с-файлами)
-11. [JSON](#json)
-12. [HTTP клиент](#http-клиент)
-13. [Обработка ошибок](#обработка-ошибок)
-14. [Модули и импорт](#модули-и-импорт)
-15. [Random](#random)
-16. [Комментарии](#комментарии)
-17. [Полный пример](#полный-пример)
-18. [Известные ограничения](#известные-ограничения)
+## Типы и переменные
 
----
-
-## Базовый синтаксис
-
-### Три типа данных:
+Четыре скалярных типа: `int`, `frac`, `str`, `bool`. Тип пишется **перед именем через точку**.
 
 ```wnd
-int.x = 42
-frac.y = 3,14
+int.count = 42
+frac.pi = 3,14
 str.name = "Wind"
+bool.ready = true
+terminal.paste -> "${int.count} ${frac.pi} ${str.name} ${bool.ready}"
 ```
 
-- `int` — целое число (C `int`)
-- `frac` — дробное (C `double`), **разделитель — запятая** (`3,14`, не точка!)
-- `str` — динамическая строка (C `char*` с автоматическим malloc/free)
-
-### Особенности
-
-- **Скобки группировки в выражениях** — квадратные `[...]`, не круглые:
-  ```wnd
-  int.r = [2 + 3] * 4    // даст 20
-  int.q = 2 + 3 * 4      // даст 14
-  ```
-- **Остаток деления** — `/%`, не `%`:
-  ```wnd
-  int.r = 7 /% 3         // 1
-  ```
-- **Касты типов** — `int(x)`, `frac(x)`:
-  ```wnd
-  int.n = int("42")          // парсит число из строки
-  frac.f = frac("3,14")      // парсит дробь со запятой
-  int.i = int(frac.y)        // дробь → целое
-  ```
-
----
-
-## Ввод и вывод
-
-### Вывод
-
-```wnd
-terminal.paste -> "Hello, World!"
-terminal.paste -> "x = {int.x}, name = {str.name}"   // интерполяция
-terminal.clear                                         // очистить терминал
+```
+42 3.14 Wind 1
 ```
 
-В `{...}` внутри строки можно вставить:
-- `{int.x}` / `{frac.x}` / `{str.x}` — переменные
-- `{int.nums[0]}` — элементы массива/list
+Дробное число пишется через **запятую**: `3,14`, не `3.14`. Логическое значение печатается как `1` или `0`.
 
-### Ввод
+Есть `var` с выводом типа и `global` для переменных верхнего уровня:
 
 ```wnd
-int.age = str.write {"Сколько тебе лет? "}     // с приглашением
-str.name = str.write {"Имя: "}
-int.x = write()                                 // тихий ввод без приглашения
+global str.app = "wind"
+var n = 10
+terminal.paste -> "${str.app} ${n}"
 ```
 
-Runtime сам валидирует тип. Введёшь букву где ждётся `int` → программа упадёт с понятной ошибкой.
+```
+wind 10
+```
 
----
+## Объявление и присваивание — не путать
 
-## Управление потоком
-
-### Условия
+Тип указывается **только при первом объявлении**. Дальше к переменной обращаются по голому имени:
 
 ```wnd
-if int.x > 0
-    terminal.paste -> "положительное"
-else if int.x < 0
-    terminal.paste -> "отрицательное"
+int.x = 5
+x = x + 3
+x += 2
+x -= 1
+terminal.paste -> "${int.x}"
+```
+
+```
+9
+```
+
+Работают `+=`, `-=`, `*=`, `/=`.
+
+## Вывод и интерполяция
+
+```wnd
+terminal.paste -> "текст"
+```
+
+Внутри строки `${...}` подставляет значение. Внутри скобок допустимо любое выражение, включая вызов функции и индексацию.
+
+## Условия
+
+```wnd
+int.age = 20
+if int.age >= 18 && int.age < 65
+    terminal.paste -> "взрослый"
 else
-    terminal.paste -> "ноль"
+    terminal.paste -> "нет"
 end if
 ```
 
-**Логические операторы:** `&&`, `||`, **скобки группировки** `[...]`:
-```wnd
-if [int.a > 0 && int.b < 10] || int.c == 99
-    terminal.paste -> "ок"
-end if
+```
+взрослый
 ```
 
-**Сравнения:** `>`, `<`, `>=`, `<=`, `==`, `!=`. Для строк работают только `==` и `!=`.
+Операторы сравнения: `==`, `!=`, `<`, `<=`, `>`, `>=`. Логические: `&&`, `||`.
 
-**Truthy-условия** (без сравнения):
-```wnd
-if cnt.has("key")          // если возвращает не 0
-    terminal.paste -> "есть"
-end if
-```
-
-### Циклы
-
-**`repeat N`** — повторить N раз (фиксированное число):
-```wnd
-repeat 5
-    terminal.paste -> "hi"
-end repeat
-```
+## Циклы
 
 **`while`** — пока условие истинно:
+
 ```wnd
 int.i = 0
-while int.i < 10
+while int.i < 3
+    terminal.paste -> "i=${int.i}"
     int.i = int.i + 1
 end while
 ```
 
-**`loop V in COLL`** — итерация по list/dict:
-```wnd
-int.list.nums = [10, 20, 30]
-loop n in nums
-    terminal.paste -> "n = {int.n}"
-end loop
+```
+i=0
+i=1
+i=2
 ```
 
-**`break`** и **`continue`** работают во всех трёх циклах.
+**`repeat N`** — повторить N раз:
 
----
+```wnd
+repeat 3
+    terminal.paste -> "тик"
+end repeat
+```
+
+```
+тик
+тик
+тик
+```
+
+**`for V in A..B`** — по диапазону. Верхняя граница **не включается**:
+
+```wnd
+for i in 1..4
+    terminal.paste -> "${i}"
+end for
+```
+
+```
+1
+2
+3
+```
+
+**`loop V in COLL`** — по списку или ключам словаря (см. раздел про списки).
+
+`break` и `continue` работают во всех циклах.
 
 ## Функции
 
+Объявляются через `func` (синоним — `fn`), закрываются просто `end`. Возвращаемый тип обязателен.
+
 ```wnd
-wnd.func square(int.x) -> int
+func square(int.x) -> int
     return int.x * int.x
-end wnd.func
+end
 
-wnd.func greet(str.name) -> str
-    str.name = "Привет, " + str.name + "!"
-    return str.name
-end wnd.func
+func greet(str.who) -> str
+    return "привет, " + str.who
+end
 
-wnd.func nothing() -> void
-    terminal.paste -> "ничего не возвращает"
-end wnd.func
-
-// Использование:
-int.r = square(5)
-str.g = greet("Wind")
-wnd.run nothing                      // void-функцию через wnd.run
+terminal.paste -> "${square(7)}"
+terminal.paste -> "${greet(\"мир\")}"
 ```
 
-- Возвращаемый тип обязателен (`-> int/frac/str/void`)
-- До 8 параметров
-- Рекурсия поддерживается
-- `str`-параметры можно безопасно переприсваивать внутри функции
-
----
-
-## Статические массивы
-
-Только `int[]` и `frac[]`, фиксированный размер:
-
-```wnd
-int.nums[5]              // массив на 5 элементов, заполнен нулями
-int.nums[0] = 10
-int.nums[1] = 20
-int.x = int.nums[0]      // чтение
-int.len = len(nums)      // 5
+```
+49
+привет, мир
 ```
 
-Для динамических — используй **list** (см. ниже).
-
----
-
-## Динамические списки (list)
-
-**Гомогенные** — все элементы одного типа.
-
-### Создание и базовые операции
+Рекурсия поддерживается:
 
 ```wnd
-int.list.nums = [10, 20, 30]
-str.list.words = ["один", "два", "три"]
-frac.list.fracs = [1,5, 2,5, 3,5]
+func fact(int.n) -> int
+    if int.n < 2
+        return 1
+    end if
+    return int.n * fact(int.n - 1)
+end
+terminal.paste -> "5! = ${fact(5)}"
+```
 
-int.list.empty = []                  // пустой
+```
+5! = 120
+```
 
-// Чтение элемента — два способа:
-int.x = int.list.nums[0]             // с префиксом
-int.y = nums[0]                      // bare access (короче)
+Функция без результата объявляется с `-> void`.
 
-// Запись:
-int.list.nums[1] = 99                // только с префиксом
+## Массивы
 
-// Методы:
-nums.add(40)                         // в конец
-nums.pop()                           // удалить последний
-nums.remove(0)                       // удалить по индексу
+Фиксированный размер, заполняются нулями:
 
-// Длина:
-int.n = len(nums)
+```wnd
+int.nums[3]
+nums[0] = 10
+nums[1] = 20
+terminal.paste -> "${int.nums[0]} ${int.nums[1]}"
+```
 
-// Итерация:
-loop v in nums
-    terminal.paste -> "{int.v}"
+```
+10 20
+```
+
+## Списки
+
+Динамический массив одного типа. Объявление — `<тип>.list.<имя>`.
+
+```wnd
+int.list.xs = [10, 20, 30]
+xs.add(40)
+terminal.paste -> "длина ${xs.len}, второй ${xs[1]}"
+loop v in xs
+    terminal.paste -> "  ${v}"
 end loop
 ```
 
----
-
-## Словари (dict)
-
-**Гомогенные** — все ключи одного типа, все значения одного типа. Поддерживаются **все 9 комбинаций** (int/frac/str × int/frac/str).
-
-```wnd
-dict[str, int].cfg = ["port": 8080, "max": 100, "timeout": 30]
-dict[int, str].byId = [1: "alice", 2: "bob"]
-dict[str, str].env = ["HOME": "/home/user", "SHELL": "bash"]
-dict[str, frac].prices = ["apple": 0,5, "milk": 2,75]
-
-dict[str, int].empty = []            // пустой
-
-// Чтение:
-int.p = cfg["port"]
-str.a = byId[1]
-
-// Запись:
-cfg["new_key"] = 42                  // bare
-dict[str, int].cfg["other"] = 1      // с префиксом
-
-// Методы:
-int.ok = cfg.has("port")             // 0/1
-cfg.delete("max")                    // удалить ключ (no-op если нет)
-
-// Длина:
-int.n = len(cfg)
-
-// Итерация по ключам:
-loop k in cfg
-    int.v = cfg[str.k]
-    terminal.paste -> "{str.k} = {int.v}"
-end loop
+```
+длина 4, второй 20
+  10
+  20
+  30
+  40
 ```
 
-**Доступ к несуществующему ключу = runtime error** (как Python KeyError). Проверяй через `.has()` или ловы через `try/catch`.
+Методы: `.add(v)`, `.pop()`, `.len`, а также `len(xs)`.
 
-**Порядок итерации** — не гарантирован (это hashmap).
+> **Ставь пробел после запятой в литерале.** `[1, 2, 3]` — список из трёх чисел. `[1,2,3]` компилятор прочитает как `[1.2, 3]`, потому что запятая в Wind — десятичный разделитель.
 
----
-
-## Строковые операции
+## Словари
 
 ```wnd
-str.t = "Hello, Wind!"
-
-int.b = len(t)                       // 12 — длина в БАЙТАХ
-int.c = chars(t)                     // 12 — длина в СИМВОЛАХ (UTF-8 aware)
-
-// Срезы:
-str.first5 = slice(t, 0, 5)          // "Hello" (по байтам)
-str.chars3 = slice_chars(t, 0, 3)    // "Hel" (по символам, UTF-8)
-str.last5 = slice(t, -5, len(t))     // "Wind!" (отрицательные индексы)
-
-// Поиск (возвращает позицию или -1):
-int.pos = find(t, "Wind")            // 7
-int.miss = find(t, "Python")         // -1
-
-// Замена (все вхождения):
-str.r = replace(t, "Wind", "Mir")    // "Hello, Mir!"
-
-// Split → str.list:
-str.csv = "a,b,c,d"
-str.list.parts = split(csv, ",")     // ["a","b","c","d"]
-
-// Join → str:
-str.joined = join(parts, "-")        // "a-b-c-d"
-
-// Конкатенация:
-str.full = "пре" + "фикс"
+dict[str,str].cfg = ["host": "localhost", "port": "8080"]
+cfg["user"] = "root"
+if cfg.has("host")
+    terminal.paste -> "хост ${cfg[\"host\"]}"
+end if
+terminal.paste -> "ключей ${cfg.len}"
 ```
 
-**Для русских/UTF-8 строк используй `chars()` и `slice_chars()`** — `len()` и `slice()` работают по байтам и могут разрезать середину символа.
+```
+хост localhost
+ключей 3
+```
 
----
+Методы: `.has(k)`, `.len`. По словарю можно пройтись через `loop k in cfg` — переменная получит ключ.
+
+## Строки
+
+```wnd
+str.a = "Wind"
+str.b = str.a + " Lang"
+terminal.paste -> "${str.b}, байт ${b.len}"
+int.num = int("42")
+terminal.paste -> "число ${int.num}, обратно ${str(int.num)}"
+```
+
+```
+Wind Lang, байт 9
+число 42, обратно 42
+```
+
+Склейка через `+`, сравнение через `==` и `!=`. Касты: `str()`, `int()`, `frac()`, `bool()`.
+
+> `.len` возвращает длину **в байтах**, не в символах. Для кириллицы это вдвое больше: `"привет".len` даст 12.
 
 ## Математика
 
 ```wnd
-frac.r = sqrt(16)                    // 4
-frac.p = pow(2, 10)                  // 1024
-frac.s = sin(PI)                     // ~0
-frac.c = cos(0)                      // 1
-frac.t = tan(PI / 4)                 // ~1
-
-frac.l = log(E)                      // 1 (натуральный)
-frac.e = exp(1)                      // 2.718...
-
-frac.f = floor(3,7)                  // 3
-frac.cl = ceil(3,2)                  // 4
-frac.rd = round(3,5)                 // 4
-
-frac.a = abs(-5,5)                   // 5.5
-frac.mn = min(3, 7)                  // 3
-frac.mx = max(3, 7)                  // 7
+terminal.paste -> "10 / 3 = ${10 / 3}"
+terminal.paste -> "10 /% 3 = ${10 /% 3}"
+frac.r = sqrt(16,0)
+terminal.paste -> "корень 16 = ${frac.r}"
 ```
 
-Константы: `PI`, `E`.
+```
+10 / 3 = 3
+10 /% 3 = 1
+корень 16 = 4
+```
 
----
+Остаток от деления — оператор **`/%`**, не `%`. Деление двух `int` целочисленное; чтобы получить дробь, оперируй `frac`. Функции из `math.h` доступны напрямую.
 
-## Работа с файлами
+## Исключения
 
 ```wnd
-// Чтение всего файла:
-str.text = file.read("config.txt")
-
-// Чтение построчно (вернёт str.list):
-str.list.lines = file.lines("log.txt")
-
-// Проверка существования:
-int.exists = file.exists("data.json")  // 0/1
-
-// Запись (statement, перезапись):
-file.write "out.txt" -> "содержимое"
-file.write "out.txt" -> str.some_var
-
-// Добавить в конец:
-file.append "log.txt" -> "новая запись\n"
+try
+    terminal.paste -> "пробуем"
+    throw "не вышло"
+catch err
+    terminal.paste -> "поймали: ${str.err}"
+end try
+terminal.paste -> "идём дальше"
 ```
 
-Если файл не открылся → runtime error (можно поймать через try/catch).
+```
+пробуем
+поймали: не вышло
+идём дальше
+```
 
----
+Переменная в `catch` — строка с текстом броска. Непойманный `throw` печатает `uncaught: ...` и завершает программу с ошибкой. Вложенность до 32 уровней.
+
+## Файлы
+
+```wnd
+file.write("/tmp/wind_demo.txt", "строка из Wind")
+str.data = file.read("/tmp/wind_demo.txt")
+terminal.paste -> "прочитали: ${str.data}"
+if file.exists("/tmp/wind_demo.txt")
+    terminal.paste -> "файл на месте"
+end if
+```
+
+```
+прочитали: строка из Wind
+файл на месте
+```
+
+Есть также `file.append(путь, текст)`.
 
 ## JSON
 
-**Только гомогенные** dict/list. Wind строго типизирован — гетерогенный JSON (с разными типами значений) не поддерживается.
-
 ```wnd
-// Encode:
-dict[str, int].cfg = ["port": 8080, "max": 100]
-str.json = json.encode(cfg)
-// "{"port":8080,"max":100}"
-
-// Decode (нужно знать схему заранее):
-dict[str, int].cfg2 = json.decode_str_int(json_text)
-dict[str, str].env2 = json.decode_str_str(env_text)
+dict[str,str].d = ["lang": "Wind", "ver": "0.1"]
+terminal.paste -> "${json.encode(d)}"
+var parsed = json.decode("{\"n\": 7}")
+terminal.paste -> "n = ${parsed.get(\"n\").int()}"
 ```
 
----
-
-## HTTP клиент
-
-```wnd
-// GET:
-str.resp = http.get("https://api.github.com/users/torvalds")
-int.code = http.status()                       // HTTP-код последнего ответа
-
-// POST с form-data:
-str.r = http.post("https://example.com/login", "user=foo&pass=bar")
-
-// POST с JSON:
-dict[str, str].payload = ["name": "Wind", "year": "2026"]
-str.body = json.encode(payload)
-str.r = http.post_json("https://api.example.com/users", body)
-
-// PUT / DELETE:
-str.r = http.put("https://api.example.com/users/1", body)
-str.r = http.delete("https://api.example.com/users/1")
+```
+{"ver":"0.1","lang":"Wind"}
+n = 7
 ```
 
-Все ошибки сети (timeout, DNS, SSL) бросают исключения — лови через `try/catch`.
+`json.encode` принимает словарь `dict[str,_]` или список. Порядок ключей на выходе не совпадает с порядком вставки — внутри хеш-таблица.
 
----
+`json.decode` возвращает значение, по которому ходят методами: `.get(ключ)`, `.at(индекс)`, `.has(ключ)`, `.len`, `.type`, а достают — `.str()`, `.int()`, `.frac()`, `.bool()`.
 
-## Обработка ошибок
+## HTTP
 
-```wnd
-try
-    str.text = file.read("missing.txt")
-    terminal.paste -> "не дойдём сюда"
-catch err
-    terminal.paste -> "поймали: {str.err}"
-end try
-
-// Custom throw:
-wnd.func divide(int.a, int.b) -> int
-    if int.b == 0
-        throw "деление на ноль"
-    end if
-    return int.a / int.b
-end wnd.func
-
-try
-    int.r = divide(10, 0)
-catch err
-    terminal.paste -> "ошибка: {str.err}"
-end try
-```
-
-**Что бросает исключения автоматически:**
-- Чтение элемента list/dict за пределами
-- Несуществующий ключ dict
-- `file.read` / `file.write` если файл не открылся
-- HTTP сетевые ошибки
-- JSON parse errors
-- `throw "..."` — вручную
-
-**Что НЕ ловится:**
-- Деление на ноль (SIGFPE) — программа умирает (TODO)
-- Malloc failures
-
----
-
-## Модули и импорт
+Клиент:
 
 ```wnd
-// в файле math.wnd:
-wnd.func square(int.x) -> int
-    return int.x * int.x
-end wnd.func
-
-// в основном файле:
-st.import math                       // импорт всего namespace
-int.r = math.square(5)               // вызов через namespace
-
-st.import math.square                // импорт одной функции
-int.r = square(5)                    // напрямую
-
-st.import math.{square, cube}        // несколько функций
+str.body = http.get("http://example.com")
+terminal.paste -> "получено байт: ${body.len}"
 ```
 
----
+```
+получено байт: 559
+```
 
-## Random
+Есть `http.post(url, тело)`.
+
+Сервер — блок с маршрутами. Выражение справа от `->` вычисляется на каждый запрос:
 
 ```wnd
-int.r = random(1, 100)               // случайное число от 1 до 100
-int.r2 = random[1, 100]              // то же, со скобками Wind-стиля
+dict[str,str].info = ["lang": "Wind"]
+http.serve 8080
+    on "/" -> "<h1>Wind</h1>"
+    on "/json" -> json.encode(info)
+end
 ```
 
----
+Сырые сокеты, HTTP/1.0, без TLS и без chunked.
+
+## Время
+
+```wnd
+terminal.paste -> "unix: ${str(time.now())}"
+```
+
+```
+unix: 1786972870
+```
+
+## Внешние библиотеки
+
+Директива `link` в начале файла добавляет `#include <имя.h>` в сгенерированный C и флаг `-lимя` в вызов gcc:
+
+```
+link "sqlite3"
+```
 
 ## Комментарии
 
-**Парные** — открывают и закрывают:
-
 ```wnd
-// это комментарий до конца строки //
-int.x = 5
-
-// многострочный
-   тоже бывает //
-
-terminal.paste -> "код"
+// это комментарий //
+terminal.paste -> "после комментария"
 ```
 
----
-
-## Полный пример
-
-```wnd
-// Скрипт: парсит конфиг из JSON и проверяет порт //
-
-wnd.func validate_port(int.p) -> str
-    if int.p < 1 || int.p > 65535
-        throw "порт вне диапазона"
-    end if
-    if int.p < 1024
-        return "привилегированный"
-    end if
-    return "обычный"
-end wnd.func
-
-try
-    str.json = file.read("/tmp/config.json")
-    dict[str, int].cfg = json.decode_str_int(json)
-    
-    if cfg.has("port")
-        int.port = cfg["port"]
-        str.kind = validate_port(int.port)
-        terminal.paste -> "порт {int.port} — {str.kind}"
-    else
-        terminal.paste -> "в конфиге нет port"
-    end if
-catch err
-    terminal.paste -> "ошибка: {str.err}"
-end try
-
-// Скачать список пользователей и сохранить //
-try
-    str.resp = http.get("https://api.example.com/users")
-    file.write "/tmp/users.json" -> str.resp
-    terminal.paste -> "сохранили"
-catch err
-    terminal.paste -> "API недоступно: {str.err}"
-end try
+```
+после комментария
 ```
 
----
+## Подводные камни
 
-## Известные ограничения
+- Запятая — десятичный разделитель, поэтому в литералах списков нужен пробел после неё.
+- Остаток от деления — `/%`.
+- Тип пишется только при объявлении. Повторное `int.x = ...` для существующей переменной трактуется как присваивание; с другим типом — ошибка компиляции.
+- `.len` у строк считает байты.
+- Коллекции однотипные: `[1, "hello"]` не соберётся.
+- `int` 32-битный, `long` и больших чисел нет.
 
-- **Гомогенные коллекции.** `[1, "hello"]` нельзя (mixed types). list и dict требуют один тип.
-- **Гомогенный JSON только.** `{"name": "X", "year": 2026}` (string + int) не парсится — Wind строго типизирован.
-- **Один поток.** Нет async/await, нет threads. Все операции блокирующие. Для скриптов норм, для нагруженных серверов — нет.
-- **`int` 32-bit.** Большие числа не поддерживаются (нет `long`/`BigInt`).
-- **Нет ООП.** Классов, наследования, методов на пользовательских типах — нет.
-- **Нет лямбд.** Функции — first-citizen только через имя, не как значение.
-- **Только Linux.** Windows .exe — в TODO.
+## Чего в языке нет
 
----
+- ООП: классов, наследования, методов на пользовательских типах. Слово `class` зарезервировано в лексере, но не реализовано.
+- Импорта модулей и разбиения программы на файлы.
+- Лямбд и функций как значений.
+- Многопоточности и async — всё блокирующее.
+- Сборки под Windows: только Linux.
 
-## Сборка из исходников
+## Как устроен компилятор
 
-```bash
-git clone https://github.com/dz-red/Wind-Lang.git
-cd Wind-Lang
-make                                 # бинарник ./wind
-./wind -s demo.wnd                   # тест
+```
+файл.wnd
+   ↓  lexer.c        токены, переводы строк значимы
+   ↓  astparse.c     рекурсивный спуск, дерево из ast.h
+   ↓  astcodegen.c   генерация C + рантайм в преамбуле
+output_ast.c
+   ↓  gcc -O2 -lgc -lm
+./app
 ```
 
-**Зависимости (Fedora):** `gcc`, `make`, `libcurl-devel`, `glibc-devel`.
-**Зависимости (Ubuntu/Debian):** `gcc`, `make`, `libcurl4-openssl-dev`.
-
----
-
-## Размер и архитектура
-
-- **Компилятор:** ~3500 строк чистого Си
-- **Транспиляция:** `.wnd` → `output.c` → `gcc -O3 -lm -lcurl` → `./app`
-- **Стартовое время:** ~2мс (нативный бинарник)
-- **Пайплайн:** лексер (`lexer.c`) → AST-парсер (`astparse.c`) → генератор Си (`astcodegen.c`)
-
----
-
-*Сделано в одиночку в 16 лет за несколько недель. Версия 0.x — pre-launch. На pull-request'ы пока не открыто.*
+Около 3500 строк чистого Си. Память — под Boehm GC, поэтому `free` в сгенерированном коде превращается в пустышку. Рантайм печатается в преамбулу выходного файла: строки, списки, хеш-таблица словарей, парсер JSON, сокеты, стек `setjmp` для исключений.
