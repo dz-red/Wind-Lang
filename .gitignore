@@ -8,5 +8,3 @@ src/*.d
 /app2
 /output.c
 /output_ast.c
-# тулинг
-.claude/
