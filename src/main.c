@@ -89,7 +89,7 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "output_ast.c generated, assembling gcc command...\n");
 
     char gcc_cmd[1024];
-    snprintf(gcc_cmd, sizeof(gcc_cmd), "gcc -O2 -o app output_ast.c -lgc");
+    snprintf(gcc_cmd, sizeof(gcc_cmd), "gcc -O2 -o app output_ast.c -lgc -lm");
 
     /* append a -l flag for each `link "lib"` directive */
     for (int i = 0; i < prog.nlinks; i++) {
