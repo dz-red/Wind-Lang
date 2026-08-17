@@ -138,6 +138,7 @@ static WType infer(const Expr *e) {
         case EX_DOT: {
             VType ov = coll_vtype(e->as.dot.obj);
             if ((ov.ck == CK_LIST || ov.ck == CK_DICT) && !strcmp(e->as.dot.field, "len")) return WT_INT;
+            if (ov.ck == CK_SCALAR && ov.elem == WT_STR && !strcmp(e->as.dot.field, "len")) return WT_INT;
             return WT_UNKNOWN;
         }
         case EX_CALL: {
@@ -442,7 +443,11 @@ static void emit_expr(FILE *o, const Expr *e) {
             const char *fn = c->as.ident;
             /* len(nums) */
             if (!strcmp(fn, "len") && e->as.call.nargs == 1) {
-                fputs("_wl_len(", o); emit_expr(o, e->as.call.args[0]); fputc(')', o);
+                if (infer(e->as.call.args[0]) == WT_STR)
+                    fputs("(int)strlen(", o);
+                else
+                    fputs("_wl_len(", o);
+                emit_expr(o, e->as.call.args[0]); fputc(')', o);
                 break;
             }
             /* касты: str/to_str/int/frac/bool с одним аргументом */
@@ -504,6 +509,10 @@ static void emit_expr(FILE *o, const Expr *e) {
             }
             if (ov.ck == CK_DICT && !strcmp(e->as.dot.field, "len")) {
                 fputs("_wd_len(", o); emit_expr(o, e->as.dot.obj); fputc(')', o);
+                break;
+            }
+            if (ov.ck == CK_SCALAR && ov.elem == WT_STR && !strcmp(e->as.dot.field, "len")) {
+                fputs("(int)strlen(", o); emit_expr(o, e->as.dot.obj); fputc(')', o);
                 break;
             }
             cg_fail("access .%s is not supported", e->as.dot.field);
@@ -724,6 +733,31 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
             if (s->as.ret.value) { fputc(' ', o); emit_expr(o, s->as.ret.value); }
             fputs(";\n", o);
             break;
+        case ST_TRY: {
+            indent(o, ind); fputs("{\n", o);
+            indent(o, ind + 1);
+            fputs("if (_wt_depth >= 32) { fprintf(stderr, \"try: too deep\\n\"); exit(1); }\n", o);
+            indent(o, ind + 1);
+            fputs("if (setjmp(_wt_jb[_wt_depth++]) == 0) {\n", o);
+            emit_block(o, &s->as.tryc.body, ind + 2);
+            indent(o, ind + 2); fputs("_wt_depth--;\n", o);
+            indent(o, ind + 1); fputs("} else {\n", o);
+            if (s->as.tryc.catch_var) {
+                sym_add(g_loc, &g_nloc, s->as.tryc.catch_var, vt_scalar(WT_STR));
+                indent(o, ind + 2);
+                fprintf(o, "char *%s = (char*)_wt_msg; (void)%s;\n",
+                        s->as.tryc.catch_var, s->as.tryc.catch_var);
+            }
+            emit_block(o, &s->as.tryc.catch_b, ind + 2);
+            indent(o, ind + 1); fputs("}\n", o);
+            indent(o, ind); fputs("}\n", o);
+            break;
+        }
+        case ST_THROW:
+            indent(o, ind); fputs("_wt_throw(", o);
+            emit_expr(o, s->as.throwc.value);
+            fputs(");\n", o);
+            break;
         case ST_BREAK:    indent(o, ind); fputs("break;\n", o); break;
         case ST_CONTINUE: indent(o, ind); fputs("continue;\n", o); break;
         case ST_OUTPUT: {
@@ -881,6 +915,16 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap) {
           "#define calloc(n,m)  GC_MALLOC((size_t)(n)*(size_t)(m))\n"
           "#define realloc(p,n) GC_REALLOC((p),(n))\n"
           "#define free(p)      ((void)(p))\n\n", out);
+
+    /* Исключения: стек setjmp-буферов. throw кладёт текст в _wt_msg и
+       прыгает в ближайший try; без try — печатает и выходит. */
+    fputs("#include <setjmp.h>\n"
+          "static jmp_buf _wt_jb[32]; static int _wt_depth = 0;\n"
+          "static const char *_wt_msg = \"\";\n"
+          "__attribute__((unused)) static void _wt_throw(const char *m){\n"
+          "    _wt_msg = m ? m : \"\";\n"
+          "    if (_wt_depth > 0) longjmp(_wt_jb[--_wt_depth], 1);\n"
+          "    fprintf(stderr, \"uncaught: %s\\n\", _wt_msg); exit(1);\n}\n\n", out);
 
     fputs("#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdarg.h>\n#include <stdint.h>\n#include <time.h>\n#include <math.h>\n\n", out);
     fputs("__attribute__((unused)) static char *wstr_cat(const char *a, const char *b){\n"
