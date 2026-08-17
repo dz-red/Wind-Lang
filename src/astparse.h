@@ -1,7 +1,6 @@
 /*
  * astparse.h — рекурсивный парсер Wind: массив Token'ов (lexer.c) → AST (ast.h).
- * Этап 3 миграции. Кодоген пока не подключён — дерево проверяется через
- * `wind --ast file.wnd`.
+ * Готовое дерево можно посмотреть: `wind --ast file.wnd`.
  */
 
 #ifndef WIND_ASTPARSE_H

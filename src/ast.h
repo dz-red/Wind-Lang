@@ -1,9 +1,9 @@
 /*
- * ast.h — типы узлов AST языка Wind. Этап 2 миграции на AST-парсер.
+ * ast.h — типы узлов AST языка Wind.
  *
- * Дерево строит astparse.c из массива Token'ов (lexer.c). Кодоген пока
- * остаётся старый (parser.c, построчный) — дерево используется только для
- * проверки парсера через `wind --ast file.wnd`.
+ * Дерево строит astparse.c из массива Token'ов (lexer.c), кодоген в
+ * astcodegen.c обходит его и печатает C. Посмотреть дерево глазами:
+ * `wind --ast file.wnd`.
  *
  * Конвенции:
  *   - Все строки (ident'ы, имена, str-литералы) — malloc'нутые копии,
@@ -68,7 +68,7 @@ typedef enum {
     DT_LIST,     /* int.list.nums        */
     DT_DICT,     /* dict[str,int].cfg    */
     DT_ARRAY,    /* int.nums[5]          */
-    DT_INFER,    /* var x = ... — тип выводится в кодогене (этап 4) */
+    DT_INFER,    /* var x = ... — тип выводится в кодогене */
 } DeclKind;
 
 typedef struct {

@@ -1,6 +1,6 @@
 /*
- * astcodegen.c — генерация C из AST. Этап 4, срезы 1-3a.
- * См. astcodegen.h для границ среза.
+ * astcodegen.c — генерация C из AST.
+ * Что именно поддержано — см. astcodegen.h.
  */
 
 #include <setjmp.h>
@@ -193,7 +193,7 @@ static WType infer(const Expr *e) {
             }
             return WT_UNKNOWN;
         }
-        default: return WT_UNKNOWN;  /* list/dict — не в срезе 3a */
+        default: return WT_UNKNOWN;  /* list/dict — считаются отдельно */
     }
 }
 
