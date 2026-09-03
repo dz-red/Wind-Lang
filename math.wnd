@@ -1,0 +1,9 @@
+// math.wnd — тестовый модуль для проверки импорта //
+
+func square(int.x) -> int
+    return int.x * int.x
+end
+
+func cube(int.x) -> int
+    return int.x * int.x * int.x
+end

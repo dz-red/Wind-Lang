@@ -1,0 +1,30 @@
+{
+  "name": "wind-language",
+  "displayName": "Wind Language",
+  "description": "Syntax highlighting + realtime error diagnostics for Wind (.wnd)",
+  "version": "0.3.0",
+  "publisher": "DZ-RED",
+  "readme": "README.md",
+  "icon": "images/icon.png",
+  "engines": { "vscode": "^1.60.0" },
+  "main": "./extension.js",
+  "activationEvents": ["onLanguage:wind"],
+  "categories": ["Programming Languages", "Linters"],
+  "contributes": {
+    "languages": [{
+      "id": "wind",
+      "aliases": ["Wind", "wnd"],
+      "extensions": [".wnd"],
+      "configuration": "./language-configuration.json",
+      "icon": {
+        "light": "./images/file-icon.png",
+        "dark": "./images/file-icon.png"
+      }
+    }],
+    "grammars": [{
+      "language": "wind",
+      "scopeName": "source.wnd",
+      "path": "./syntaxes/wind.tmLanguage.json"
+    }]
+  }
+}

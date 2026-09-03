@@ -1,0 +1,18 @@
+use math
+take square, cube from math
+
+// Срез 4c: HTTP-сервер (raw sockets, без TLS) //
+// запуск: ./wind --build demo.wnd  -> слушает порт 8080, Ctrl-C для выхода //
+// проверка: curl localhost:8080 на путях / /json /time //
+// хендлеры это выражения, вычисляются на КАЖДЫЙ запрос (см. /time) //
+
+dict[str,str].info
+info["lang"] = "Wind"
+info["slice"] = "4c"
+
+http.serve 8080
+    on "/" -> "<h1>Wind web server</h1><p>routes: /json /time</p>"
+    on "/json" -> json.encode(info)
+    on "/time" -> str(time.now())
+    on "/sq" -> str(square(7))
+end

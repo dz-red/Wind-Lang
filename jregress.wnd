@@ -1,0 +1,28 @@
+// регресс Среза 6: ${} интерполяция, литеральные { }, for, list[T], касты-методы, bool //
+str.s = "no braces here"
+terminal.paste -> "plain: ${s}"
+
+/* литеральный JSON прямо в строке — без экранирования, скобки больше не интерполяция */
+str.b = "json-ish: {\"a\": 1, \"b\": [2, 3]}"
+terminal.paste -> "literal braces: ${b}"
+
+int.x = 7
+terminal.paste -> "interp: x=${x} done"
+
+dict[str,int].d
+d["k"] = 42
+int.hk = d.has("k")
+terminal.paste -> "dict has k: ${hk}"
+
+list[int].nums = [3, 1, 2]
+for n in nums
+    terminal.paste -> "n=${n}"
+end
+
+for i in 0..3
+    terminal.paste -> "range ${i}"
+end
+
+str.up = 99.str()
+bool.flag = true
+terminal.paste -> "cast=${up} flag=${flag}"

@@ -1,0 +1,11 @@
+link "sqlite3"
+
+global str.ver = sqlite3_libversion()
+
+func get_info(str.msg) -> str
+    return "sqlite version on fedora: " + ver
+end
+
+http.serve 8080
+    on "/info" -> get_info("run")
+end

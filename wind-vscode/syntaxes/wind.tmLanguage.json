@@ -1,0 +1,310 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Wind",
+  "scopeName": "source.wnd",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#constants" },
+    { "include": "#declarations" },
+    { "include": "#http-routes" },
+    { "include": "#control-keywords" },
+    { "include": "#block-keywords" },
+    { "include": "#statement-builtins" },
+    { "include": "#expression-builtins" },
+    { "include": "#types" },
+    { "include": "#numbers" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "name": "comment.block",
+      "begin": "//",
+      "end": "//"
+    },
+    "strings": {
+      "name": "string.quoted.double",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "comment": "Interpolation {int.x}, {frac.x}, {str.x}, {int.list.x[0]}, etc.",
+          "match": "(\\{)(int|frac|str)(\\.list)?(\\.)([A-Za-z_][A-Za-z0-9_]*)(\\[[^\\]]+\\])?(\\})",
+          "captures": {
+            "1": { "name": "punctuation.section.interpolation.begin" },
+            "2": { "name": "storage.type" },
+            "3": { "name": "storage.type" },
+            "4": { "name": "punctuation.accessor" },
+            "5": { "name": "variable.other" },
+            "6": { "name": "meta.brackets" },
+            "7": { "name": "punctuation.section.interpolation.end" }
+          }
+        },
+        {
+          "name": "constant.character.escape",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "constants": {
+      "comment": "Built-in math constants",
+      "name": "constant.language",
+      "match": "\\b(PI|E)\\b"
+    },
+    "declarations": {
+      "patterns": [
+                {
+          "comment": "link \"sqlite3\"",
+          "match": "\\b(link)\\s+(\"[^\"]*\")",
+          "captures": {
+            "1": { "name": "keyword.control.import" },
+            "2": { "name": "string.quoted.double" }
+          }
+        },
+        {
+          "comment": "use math",
+          "match": "\\b(use)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.control.import" },
+            "2": { "name": "entity.name.namespace" }
+          }
+        },
+        {
+          "comment": "take sqrt, pow from math",
+          "match": "\\b(take)\\b\\s+([A-Za-z_][A-Za-z0-9_,\\s]*?)\\s+(from)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.control.import" },
+            "2": { "name": "entity.name.function" },
+            "3": { "name": "keyword.control.import" },
+            "4": { "name": "entity.name.namespace" }
+          }
+        },
+
+        {
+          "comment": "func / fn / wnd.func name(...)",
+          "match": "\\b(wnd\\.func|func|fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.function" },
+            "2": { "name": "entity.name.function" }
+          }
+        },
+        {
+          "comment": "global / wnd.global int.NAME",
+          "match": "\\b(wnd\\.global|global)\\b\\s+(int|frac|str)(\\.)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.global" },
+            "2": { "name": "storage.type" },
+            "3": { "name": "punctuation.accessor" },
+            "4": { "name": "variable.other.global" }
+          }
+        },
+        {
+          "comment": "class Name — зарезервировано",
+          "match": "\\b(class)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.class" },
+            "2": { "name": "entity.name.class" }
+          }
+        },
+        {
+          "comment": "wnd.run someFunc",
+          "match": "\\b(wnd\\.run)\\s+([A-Za-z_][A-Za-z0-9_.]*)",
+          "captures": {
+            "1": { "name": "keyword.control" },
+            "2": { "name": "entity.name.function" }
+          }
+        },
+        {
+          "comment": "list-type prefix: int.list.NAME / frac.list.NAME / str.list.NAME",
+          "match": "\\b(int|frac|str)(\\.list)(\\.)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type" },
+            "2": { "name": "storage.type" },
+            "3": { "name": "punctuation.accessor" },
+            "4": { "name": "variable.other" }
+          }
+        },
+        {
+          "comment": "dict-type prefix: dict[KT, VT].NAME",
+          "match": "\\b(dict)\\s*(\\[)\\s*(int|frac|str)\\s*(,)\\s*(int|frac|str)\\s*(\\])(\\.)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type" },
+            "2": { "name": "punctuation.brackets" },
+            "3": { "name": "storage.type" },
+            "4": { "name": "punctuation.comma" },
+            "5": { "name": "storage.type" },
+            "6": { "name": "punctuation.brackets" },
+            "7": { "name": "punctuation.accessor" },
+            "8": { "name": "variable.other" }
+          }
+        }
+      ]
+    },
+    "http-routes": {
+      "patterns": [
+        {
+          "comment": "http.serve PORT",
+          "match": "\\b(http\\.serve)\\s+(\\d+)",
+          "captures": {
+            "1": { "name": "keyword.control.http" },
+            "2": { "name": "constant.numeric" }
+          }
+        },
+        {
+          "comment": "on \"PATH\" -> handler",
+          "match": "\\b(on)\\b\\s+(\"[^\"]*\")\\s*(->)\\s*([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.control.http" },
+            "2": { "name": "string.quoted.double" },
+            "3": { "name": "keyword.operator.arrow" },
+            "4": { "name": "entity.name.function" }
+          }
+        }
+      ]
+    },
+    "control-keywords": {
+      "name": "keyword.control",
+      "match": "\\b(if|else|while|repeat|loop|in|break|continue|try|catch|throw|return)\\b"
+    },
+    "block-keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.end",
+          "match": "\\bend\\s+(if|while|repeat|loop|try|wnd\\.func|http\\.serve)\\b"
+        },
+        {
+          "name": "keyword.control.end",
+          "match": "\\bend\\b"
+        }
+      ]
+    },
+    "statement-builtins": {
+      "patterns": [
+        {
+          "comment": "terminal.paste / terminal.clear / st.import",
+          "name": "support.function.builtin",
+          "match": "\\b(terminal\\.paste|terminal\\.clear|st\\.import)\\b"
+        },
+        {
+          "comment": "file.write \"path\" -> EXPR (statement)",
+          "name": "support.function.builtin",
+          "match": "\\b(file\\.write|file\\.append)\\b"
+        },
+        {
+          "comment": "str.write {\"prompt\"} — input с приглашением",
+          "name": "support.function.builtin",
+          "match": "\\b(str\\.write|write)\\b(?=\\s*\\{|\\s*\\()"
+        }
+      ]
+    },
+    "expression-builtins": {
+      "patterns": [
+        {
+          "comment": "string ops",
+          "name": "support.function.builtin",
+          "match": "\\b(len|chars|slice|slice_chars|find|replace|split|join)(?=\\s*\\()"
+        },
+        {
+          "comment": "math builtins",
+          "name": "support.function.builtin",
+          "match": "\\b(sqrt|pow|sin|cos|tan|log|exp|floor|ceil|round|abs|min|max|random)(?=\\s*[\\(\\[])"
+        },
+        {
+          "comment": "conversion + env + args + render + redirect",
+          "name": "support.function.builtin",
+          "match": "\\b(to_str|to_int|to_frac|args|env|render|redirect)(?=\\s*\\()"
+        },
+        {
+          "comment": "file read-side",
+          "name": "support.function.builtin",
+          "match": "\\b(file\\.read|file\\.lines|file\\.exists)(?=\\s*\\()"
+        },
+        {
+          "comment": "shell / subprocess",
+          "name": "support.function.builtin",
+          "match": "\\b(shell|shell_run)(?=\\s*\\()"
+        },
+        {
+          "comment": "JSON",
+          "name": "support.function.builtin",
+          "match": "\\b(json\\.encode|json\\.decode_str_int|json\\.decode_str_str)(?=\\s*\\()"
+        },
+        {
+          "comment": "HTTP client",
+          "name": "support.function.builtin",
+          "match": "\\b(http\\.get|http\\.post|http\\.post_json|http\\.put|http\\.delete|http\\.status)(?=\\s*\\()"
+        },
+        {
+          "comment": "type casts",
+          "name": "support.function.builtin",
+          "match": "\\b(int|frac)(?=\\s*\\()"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "comment": "Type prefix: int.NAME, frac.NAME, str.NAME",
+          "match": "\\b(int|frac|str)(\\.)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type" },
+            "2": { "name": "punctuation.accessor" },
+            "3": { "name": "variable.other" }
+          }
+        },
+        {
+          "comment": "Standalone type names: void / list / dict (в сигнатурах)",
+          "name": "storage.type",
+          "match": "\\b(int|frac|str|list|dict|void)\\b"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "comment": "Frac: 3,14 (запятая — Wind-стиль)",
+          "name": "constant.numeric.frac",
+          "match": "\\b\\d+,\\d+\\b"
+        },
+        {
+          "name": "constant.numeric.int",
+          "match": "\\b\\d+\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "comment": "Arrow",
+          "name": "keyword.operator.arrow",
+          "match": "->"
+        },
+        {
+          "comment": "Wind remainder operator",
+          "name": "keyword.operator.arithmetic",
+          "match": "/%"
+        },
+        {
+          "comment": "Augmented assignments",
+          "name": "keyword.operator.assignment.augmented",
+          "match": "\\+=|-=|\\*=|/="
+        },
+        {
+          "comment": "Comparison",
+          "name": "keyword.operator.comparison",
+          "match": "==|!=|>=|<=|>|<"
+        },
+        {
+          "comment": "Logical",
+          "name": "keyword.operator.logical",
+          "match": "&&|\\|\\|"
+        },
+        {
+          "comment": "Arithmetic + assignment",
+          "name": "keyword.operator",
+          "match": "[+\\-*/=]"
+        }
+      ]
+    }
+  }
+}

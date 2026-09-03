@@ -1,0 +1,10 @@
+# артефакты сборки
+src/*.o
+src/*.d
+*.o
+*.d
+/wind
+/app
+/app2
+/output.c
+/output_ast.c
