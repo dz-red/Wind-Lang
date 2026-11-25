@@ -71,13 +71,15 @@ terminal.paste -> "текст"
 
 ## Условия
 
+Один `end` закрывает ближайший открытый блок: `if`, цикл, функцию, `try` или `http.serve`. Можно уточнить имя блока (`end if`, `end while` и т. д.), но оно должно совпадать с открывающей конструкцией.
+
 ```wnd
 int.age = 20
-if int.age >= 18 && int.age < 65
+if age >= 18 && age < 65
     terminal.paste -> "взрослый"
 else
     terminal.paste -> "нет"
-end if
+end
 ```
 
 ```
@@ -92,10 +94,10 @@ end if
 
 ```wnd
 int.i = 0
-while int.i < 3
-    terminal.paste -> "i=${int.i}"
-    int.i = int.i + 1
-end while
+while i < 3
+    terminal.paste -> "i=${i}"
+    i = i + 1
+end
 ```
 
 ```
@@ -109,7 +111,7 @@ i=2
 ```wnd
 repeat 3
     terminal.paste -> "тик"
-end repeat
+end
 ```
 
 ```
@@ -123,7 +125,7 @@ end repeat
 ```wnd
 for i in 1..4
     terminal.paste -> "${i}"
-end for
+end
 ```
 
 ```
@@ -142,11 +144,11 @@ end for
 
 ```wnd
 func square(int.x) -> int
-    return int.x * int.x
+    return x * x
 end
 
 func greet(str.who) -> str
-    return "привет, " + str.who
+    return "привет, " + who
 end
 
 terminal.paste -> "${square(7)}"
@@ -162,10 +164,10 @@ terminal.paste -> "${greet(\"мир\")}"
 
 ```wnd
 func fact(int.n) -> int
-    if int.n < 2
+    if n < 2
         return 1
-    end if
-    return int.n * fact(int.n - 1)
+    end
+    return n * fact(n - 1)
 end
 terminal.paste -> "5! = ${fact(5)}"
 ```
@@ -201,7 +203,7 @@ xs.add(40)
 terminal.paste -> "длина ${xs.len}, второй ${xs[1]}"
 loop v in xs
     terminal.paste -> "  ${v}"
-end loop
+end
 ```
 
 ```
@@ -223,7 +225,7 @@ dict[str,str].cfg = ["host": "localhost", "port": "8080"]
 cfg["user"] = "root"
 if cfg.has("host")
     terminal.paste -> "хост ${cfg[\"host\"]}"
-end if
+end
 terminal.paste -> "ключей ${cfg.len}"
 ```
 
@@ -278,7 +280,7 @@ try
     throw "не вышло"
 catch err
     terminal.paste -> "поймали: ${str.err}"
-end try
+end
 terminal.paste -> "идём дальше"
 ```
 
@@ -298,7 +300,7 @@ str.data = file.read("/tmp/wind_demo.txt")
 terminal.paste -> "прочитали: ${str.data}"
 if file.exists("/tmp/wind_demo.txt")
     terminal.paste -> "файл на месте"
-end if
+end
 ```
 
 ```

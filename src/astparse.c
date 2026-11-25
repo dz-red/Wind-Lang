@@ -67,10 +67,22 @@ static void expect_eol(P *p) {
     if (cur(p) == TK_EOF) return;
     perr(p, "expected end of line, got %s", wind_token_kind_name(cur(p)));
 }
-/* съесть `end` и всё до конца строки (`end`, `end func`, `end http.serve`...) */
-static void consume_end(P *p) {
+/* `end` закрывает текущий блок; старый суффикс можно указать явно. */
+static void consume_end(P *p, TokenKind opener, const char *name) {
     expect(p, TK_KW_END, "end");
-    while (cur(p) != TK_NEWLINE && cur(p) != TK_EOF) adv(p);
+    if (cur(p) != TK_NEWLINE && cur(p) != TK_EOF) {
+        if (opener == TK_IDENT) { /* у http.serve нет отдельного токена */
+            if (cur(p) != TK_IDENT || strcmp(tok(p)->text, "http") != 0)
+                perr(p, "expected 'end' or 'end %s'", name);
+            adv(p);
+            expect(p, TK_DOT, "'.' in 'end http.serve'");
+            if (cur(p) != TK_IDENT || strcmp(tok(p)->text, "serve") != 0)
+                perr(p, "expected 'serve' in 'end http.serve'");
+            adv(p);
+        } else if (!accept(p, opener)) {
+            perr(p, "expected 'end' or 'end %s'", name);
+        }
+    }
     expect_eol(p);
 }
 
@@ -528,7 +540,7 @@ static Stmt *parse_if(P *p, int line, int col) {
             break;
         }
     }
-    consume_end(p);
+    consume_end(p, TK_KW_IF, "if");
     Stmt *s = ast_stmt(ST_IF, line, col);
     s->as.iff.clauses = clauses; s->as.iff.nclauses = n;
     s->as.iff.else_b = else_b; s->as.iff.has_else = has_else;
@@ -539,7 +551,7 @@ static Stmt *parse_while(P *p, int line, int col) {
     expect(p, TK_KW_WHILE, "while");
     Expr *cond = parse_expr(p); expect_eol(p);
     Block body = parse_block(p);
-    consume_end(p);
+    consume_end(p, TK_KW_WHILE, "while");
     Stmt *s = ast_stmt(ST_WHILE, line, col);
     s->as.whilel.cond = cond; s->as.whilel.body = body;
     return s;
@@ -549,7 +561,7 @@ static Stmt *parse_repeat(P *p, int line, int col) {
     expect(p, TK_KW_REPEAT, "repeat");
     Expr *count = parse_expr(p); expect_eol(p);
     Block body = parse_block(p);
-    consume_end(p);
+    consume_end(p, TK_KW_REPEAT, "repeat");
     Stmt *s = ast_stmt(ST_REPEAT, line, col);
     s->as.repeatl.count = count; s->as.repeatl.body = body;
     return s;
@@ -561,7 +573,7 @@ static Stmt *parse_loop(P *p, int line, int col) {
     expect(p, TK_KW_IN, "in");
     Expr *coll = parse_expr(p); expect_eol(p);
     Block body = parse_block(p);
-    consume_end(p);
+    consume_end(p, TK_KW_LOOP, "loop");
     Stmt *s = ast_stmt(ST_LOOP, line, col);
     s->as.loopl.var = dup_s(v->text); s->as.loopl.coll = coll; s->as.loopl.body = body;
     return s;
@@ -575,7 +587,7 @@ static Stmt *parse_for(P *p, int line, int col) {
     if (accept(p, TK_DOTDOT)) {                   /* for i in A..B — диапазон [A, B) */
         Expr *to = parse_expr(p); expect_eol(p);
         Block body = parse_block(p);
-        consume_end(p);
+        consume_end(p, TK_KW_FOR, "for");
         Stmt *s = ast_stmt(ST_FOR, line, col);
         s->as.forr.var = dup_s(v->text);
         s->as.forr.from = first; s->as.forr.to = to; s->as.forr.body = body;
@@ -583,7 +595,7 @@ static Stmt *parse_for(P *p, int line, int col) {
     }
     expect_eol(p);                                /* for v in coll — как loop */
     Block body = parse_block(p);
-    consume_end(p);
+    consume_end(p, TK_KW_FOR, "for");
     Stmt *s = ast_stmt(ST_LOOP, line, col);
     s->as.loopl.var = dup_s(v->text); s->as.loopl.coll = first; s->as.loopl.body = body;
     return s;
@@ -624,7 +636,7 @@ static Stmt *parse_func(P *p, int line, int col) {
     }
     expect_eol(p);
     Block body = parse_block(p);
-    consume_end(p);
+    consume_end(p, TK_KW_FUNC, "func");
     Stmt *s = ast_stmt(ST_FUNC, line, col);
     s->as.func.name = dup_s(nm->text);
     s->as.func.params = params; s->as.func.nparams = nparams;
@@ -652,7 +664,7 @@ static Stmt *parse_try(P *p, int line, int col) {
     if (cur(p) == TK_IDENT) cv = dup_s(adv(p)->text);
     expect_eol(p);
     Block catch_b = parse_block(p);
-    consume_end(p);
+    consume_end(p, TK_KW_TRY, "try");
     Stmt *s = ast_stmt(ST_TRY, line, col);
     s->as.tryc.body = body; s->as.tryc.catch_var = cv; s->as.tryc.catch_b = catch_b;
     return s;
@@ -702,7 +714,7 @@ static Stmt *parse_http_serve(P *p, int line, int col) {
         routes[nroutes].path = path; routes[nroutes].handler = handler; nroutes++;
         skipnl(p);
     }
-    consume_end(p);
+    consume_end(p, TK_IDENT, "http.serve");
     Stmt *s = ast_stmt(ST_HTTP_SERVE, line, col);
     s->as.serve.port = port; s->as.serve.routes = routes; s->as.serve.nroutes = nroutes;
     s->as.serve.body.items = NULL; s->as.serve.body.n = 0;
