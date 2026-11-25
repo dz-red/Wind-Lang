@@ -2,6 +2,38 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef _WIN32
+#include <errno.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#ifndef WIND_RUNTIME_DIR
+#define WIND_RUNTIME_DIR "runtime"
+#endif
+
+static int build_gc_strings(void) {
+    char *args[] = {
+        "gcc", "-O2", "-Werror=int-conversion", "-Werror=incompatible-pointer-types",
+        "-Werror=return-type", "-I", WIND_RUNTIME_DIR, "-o", "app", "output_ast.c",
+        WIND_RUNTIME_DIR "/gc.c", WIND_RUNTIME_DIR "/strings_gc.c", "-lm", NULL
+    };
+    pid_t child = fork();
+    if (child < 0) { perror("fork"); return 0; }
+    if (child == 0) {
+        execvp(args[0], args);
+        perror("gcc");
+        _exit(127);
+    }
+    int status;
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno == EINTR) continue;
+        perror("waitpid");
+        return 0;
+    }
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+#endif
+
 #include "errors.h"
 #include "lexer.h"
 #include "ast.h"
@@ -17,12 +49,13 @@ static void print_help(const char *prog) {
         "  %s <file.wnd>       compile; produces ./app\n"
         "  %s -s <file.wnd>    compile AND run immediately\n"
         "  %s --ast <file.wnd> print the AST and exit\n"
+        "  %s --gc-strings <file.wnd> use the experimental Wind string GC (Linux)\n"
         "  %s --help           this help\n",
-        prog, prog, prog, prog);
+        prog, prog, prog, prog, prog);
 }
 
 int main(int argc, char *argv[]) {
-    int run_after = 0, mode_ast = 0;
+    int run_after = 0, mode_ast = 0, gc_strings = 0;
     const char *input = NULL;
 
     for (int i = 1; i < argc; i++) {
@@ -30,6 +63,8 @@ int main(int argc, char *argv[]) {
             run_after = 1;
         } else if (strcmp(argv[i], "--ast") == 0) {
             mode_ast = 1;
+        } else if (strcmp(argv[i], "--gc-strings") == 0) {
+            gc_strings = 1;
         } else if (strcmp(argv[i], "--build") == 0) {
             /* build — теперь поведение по умолчанию; флаг принимаем для совместимости */
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -49,6 +84,12 @@ int main(int argc, char *argv[]) {
     }
 
     if (!input) { print_help(argv[0]); return 1; }
+#ifdef _WIN32
+    if (gc_strings) {
+        fprintf(stderr, "[wind] --gc-strings is not available on Windows\n");
+        return 1;
+    }
+#endif
     current_file = input;
 
     FILE *f = fopen(input, "rb");
@@ -84,10 +125,21 @@ int main(int argc, char *argv[]) {
     FILE *o = fopen("output_ast.c", "w");
     if (!o) { fprintf(stderr, C_RED "[ERROR]" C_RST " cannot create output_ast.c\n"); return 1; }
     char cgerr[256];
-    int ok = wind_codegen(&prog, o, cgerr, sizeof cgerr);
+    int ok = wind_codegen(&prog, o, cgerr, sizeof cgerr, gc_strings);
     fclose(o);
     ast_free_program(&prog); wind_tokens_free(toks, ntok); free(src);
     if (!ok) { fprintf(stderr, C_RED "[codegen error]" C_RST " %s\n", cgerr); return 1; }
+
+#ifndef _WIN32
+    if (gc_strings) {
+        fprintf(stderr, C_CYN "[wind] gcc -O2 (experimental Wind string GC)" C_RST "\n");
+        if (!build_gc_strings()) {
+            fprintf(stderr, C_RED "[wind] gcc failed\n" C_RST);
+            return 1;
+        }
+        goto compiled;
+    }
+#endif
 
     fprintf(stderr, "output_ast.c generated, assembling gcc command...\n");
 
@@ -115,6 +167,9 @@ int main(int argc, char *argv[]) {
     if (system(gcc_cmd) != 0) {
         fprintf(stderr, C_RED "[wind] gcc failed\n" C_RST); return 1;
     }
+#ifndef _WIN32
+compiled:
+#endif
     fprintf(stderr, C_CYN "Done: ./app" C_RST "\n");
     if (run_after) {
 #ifdef _WIN32

@@ -31,6 +31,7 @@ static Sym      g_glob[256]; static int g_nglob;
 static Sym      g_loc[256];  static int g_nloc;     /* сбрасывается на каждую функцию/main */
 static FuncSig  g_func[256]; static int g_nfunc;
 static int      g_rep_id;                            /* уникальные счётчики repeat-циклов */
+static int      g_gc_strings, g_in_main;
 
 static void cg_fail(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
@@ -362,6 +363,10 @@ static void emit_expr(FILE *o, const Expr *e) {
             if (c->kind == EX_DOT) {
                 const Expr *obj = c->as.dot.obj;
                 const char *m = c->as.dot.field;
+                if (g_gc_strings && obj->kind == EX_IDENT &&
+                    (!strcmp(obj->as.ident, "file") || !strcmp(obj->as.ident, "json") ||
+                     !strcmp(obj->as.ident, "http")))
+                    cg_fail("--gc-strings does not support the %s module yet", obj->as.ident);
                 /* встроенный модуль time */
             if (obj->kind == EX_IDENT && !strcmp(obj->as.ident, "time")) {
                 if (!strcmp(m, "now"))   { fputs("_wtime_now()", o); break; }
@@ -474,6 +479,8 @@ static void emit_expr(FILE *o, const Expr *e) {
             if (!strcmp(fn, "len") && e->as.call.nargs == 1) {
                 if (infer(e->as.call.args[0]) == WT_STR)
                     fputs("(int)strlen(", o);
+                else if (g_gc_strings)
+                    cg_fail("--gc-strings only supports len() of strings");
                 else
                     fputs("_wl_len(", o);
                 emit_expr(o, e->as.call.args[0]); fputc(')', o);
@@ -503,6 +510,8 @@ static void emit_expr(FILE *o, const Expr *e) {
                 }
                 break;
             }
+            if (g_gc_strings && func_ret(fn) == WT_UNKNOWN)
+                cg_fail("--gc-strings: unknown function '%s'", fn);
             fprintf(o, "%s(", fn);
             for (int i = 0; i < e->as.call.nargs; i++) {
                 if (i) fputs(", ", o);
@@ -512,6 +521,7 @@ static void emit_expr(FILE *o, const Expr *e) {
             break;
         }
         case EX_INDEX: {                              /* coll[idx]: массив / список / словарь */
+            if (g_gc_strings) cg_fail("--gc-strings does not support indexing yet");
             VType cv = coll_vtype(e->as.index.coll);
             if (cv.ck == CK_LIST) {
                 fprintf(o, "_wl_get_%s(", list_suffix(cv.elem));
@@ -577,6 +587,10 @@ static void emit_print(FILE *o, const Expr *val, int ind) {
 /* объявление локальной переменной (в теле функции/main) */
 static void emit_local_decl(FILE *o, const Stmt *s, int ind) {
     const DeclType *dt = &s->as.decl.dtype;
+    if (g_gc_strings && (dt->kind != DT_SCALAR && dt->kind != DT_INFER))
+        cg_fail("--gc-strings only supports scalar declarations");
+    if (g_gc_strings && s->as.decl.is_global)
+        cg_fail("--gc-strings: global declarations must be at the top level");
     if (dt->kind == DT_ARRAY) {
         if (local_declared(s->as.decl.name))
             cg_fail("array '%s' is already declared", s->as.decl.name);                       /* int.nums[5] → int nums[5] = {0}; */
@@ -656,11 +670,13 @@ static void emit_local_decl(FILE *o, const Stmt *s, int ind) {
         fputs(";\n", o);
         return;
     }
-    sym_add(g_loc, &g_nloc, s->as.decl.name, vt_scalar(t));
+    if (!g_gc_strings) sym_add(g_loc, &g_nloc, s->as.decl.name, vt_scalar(t));
     indent(o, ind);
     fprintf(o, "%s %s", ctype(t), s->as.decl.name);
     if (s->as.decl.init) { fputs(" = ", o); emit_expr(o, s->as.decl.init); }
+    else if (g_gc_strings) fputs(t == WT_STR ? " = \"\"" : " = 0", o);
     fputs(";\n", o);
+    if (g_gc_strings) sym_add(g_loc, &g_nloc, s->as.decl.name, vt_scalar(t));
 }
 
 static const char *assignop_c(TokenKind op) {
@@ -672,6 +688,9 @@ static const char *assignop_c(TokenKind op) {
 }
 
 static void emit_stmt(FILE *o, const Stmt *s, int ind) {
+    if (g_gc_strings && (s->kind == ST_TRY || s->kind == ST_THROW ||
+                        s->kind == ST_HTTP_SERVE || s->kind == ST_LOOP))
+        cg_fail("--gc-strings does not support exceptions, http.serve or collection loops yet");
     switch (s->kind) {
         case ST_VAR_DECL:
             emit_local_decl(o, s, ind);
@@ -679,6 +698,7 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
         case ST_ASSIGN: {
             const Expr *tgt = s->as.assign.target;
             if (tgt->kind == EX_INDEX) {              /* запись элемента списка через рантайм */
+                if (g_gc_strings) cg_fail("--gc-strings does not support indexing yet");
                 VType cv = coll_vtype(tgt->as.index.coll);
                 if (cv.ck == CK_LIST) {
                     if (s->as.assign.op != TK_ASSIGN)
@@ -746,18 +766,22 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
         }
         case ST_FOR: {                              /* for i in A..B → for(int i=A; i<B; i++) */
             const char *v = s->as.forr.var;
+            int before_loop = g_nloc;
             indent(o, ind);
             fprintf(o, "for (int %s = (", v);
             emit_expr(o, s->as.forr.from);
+            if (g_gc_strings) sym_add(g_loc, &g_nloc, v, vt_scalar(WT_INT));
             fprintf(o, "); %s < (", v);
             emit_expr(o, s->as.forr.to);
             fprintf(o, "); %s++) {\n", v);
-            sym_add(g_loc, &g_nloc, v, vt_scalar(WT_INT));
+            if (!g_gc_strings) sym_add(g_loc, &g_nloc, v, vt_scalar(WT_INT));
             emit_block(o, &s->as.forr.body, ind + 1);
+            if (g_gc_strings) g_nloc = before_loop;
             indent(o, ind); fputs("}\n", o);
             break;
         }
         case ST_RETURN:
+            if (g_gc_strings && g_in_main) cg_fail("--gc-strings: return is only allowed in a function");
             indent(o, ind); fputs("return", o);
             if (s->as.ret.value) { fputc(' ', o); emit_expr(o, s->as.ret.value); }
             fputs(";\n", o);
@@ -871,7 +895,9 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
 }
 
 static void emit_block(FILE *o, const Block *b, int ind) {
+    int before_block = g_nloc;
     for (int i = 0; i < b->n; i++) emit_stmt(o, b->items[i], ind);
+    if (g_gc_strings) g_nloc = before_block;
 }
 
 /* ---------- функция ---------- */
@@ -896,12 +922,38 @@ static void emit_func(FILE *o, const Stmt *s) {
     fputs("}\n\n", o);
 }
 
+/* Глобалы читаются вне main: одноимённая локальная переменная их не скрывает. */
+static int emit_gc_global_roots(FILE *out) {
+    int count = 0;
+    fputs("static void _wind_collect(size_t n, const void **roots) {\n", out);
+    for (int i = 0; i < g_nglob; i++) {
+        if (g_glob[i].vt.elem != WT_STR) continue;
+        fprintf(out, "    roots[n++] = %s;\n", g_glob[i].name);
+        count++;
+    }
+    fputs("    wind_str_collect(roots, n);\n}\n", out);
+    return count;
+}
+
+static void emit_gc_checkpoint(FILE *out, int globals) {
+    int locals = 0;
+    for (int i = 0; i < g_nloc; i++)
+        if (g_loc[i].vt.elem == WT_STR) locals++;
+    fprintf(out, "    _wind_collect(%d, (const void *[%d]){", locals, locals + globals + 1);
+    for (int i = 0; i < g_nloc; i++)
+        if (g_loc[i].vt.elem == WT_STR) fprintf(out, "%s, ", g_loc[i].name);
+    fputs("NULL});\n", out);
+}
+
 /* ---------- точка входа ---------- */
-int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap) {
+int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_strings) {
     cg_err = errbuf; cg_errcap = errcap;
     g_nglob = g_nloc = g_nfunc = g_rep_id = 0;
+    g_gc_strings = gc_strings;
+    g_in_main = 0;
 
     if (setjmp(cg_jb)) return 0;
+    if (g_gc_strings && p->nlinks) cg_fail("--gc-strings does not support link directives yet");
 
     /* пасс 1: сигнатуры функций + типы глобалов (чтобы вызовы/ссылки типизировались) */
     for (int i = 0; i < p->body.n; i++) {
@@ -913,6 +965,8 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap) {
             g_nfunc++;
         } else if (s->kind == ST_VAR_DECL && s->as.decl.is_global) {
             const DeclType *dt = &s->as.decl.dtype;
+            if (g_gc_strings && dt->kind != DT_SCALAR && dt->kind != DT_INFER)
+                cg_fail("--gc-strings only supports scalar declarations");
             VType vt;
             if (dt->kind == DT_ARRAY) {
                 WType el = wt_base(dt->base);
@@ -929,13 +983,18 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap) {
 
     /* преамбула */
     fputs("/* Generated by Wind AST codegen */\n", out);
-        fputs("#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdarg.h>\n#include <stdint.h>\n#include <time.h>\n#include <math.h>\n#include <gc.h>\n\n", out);
+    fputs("#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdarg.h>\n#include <stdint.h>\n#include <time.h>\n#include <math.h>\n\n", out);
     /* `link "x"` даёт ТОЛЬКО флаг -lx компоновщику. Заголовок не подставляем:
        имя библиотеки и имя заголовка совпадают далеко не всегда (-lm/math.h,
        -lz/zlib.h, -lpthread/pthread.h). Нужный #include пишет программист. */
 
+    if (g_gc_strings) {
+        fputs("#include \"strings_gc.h\"\n\n", out);
+    } else {
     /* Boehm GC: весь malloc/calloc/realloc уходит под сборщик, free — пустышка */
-    fputs("#define malloc(n)    GC_MALLOC(n)\n"
+    fputs("#include <gc.h>\n"
+          "#define wind_str_alloc malloc\n"
+          "#define malloc(n)    GC_MALLOC(n)\n"
           "#define calloc(n,m)  GC_MALLOC((size_t)(n)*(size_t)(m))\n"
           "#define realloc(p,n) GC_REALLOC((p),(n))\n"
           "#define free(p)      ((void)(p))\n\n", out);
@@ -949,25 +1008,26 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap) {
           "    _wt_msg = m ? m : \"\";\n"
           "    if (_wt_depth > 0) longjmp(_wt_jb[--_wt_depth], 1);\n"
           "    fprintf(stderr, \"uncaught: %s\\n\", _wt_msg); exit(1);\n}\n\n", out);
+    }
 
-    fputs("#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdarg.h>\n#include <stdint.h>\n#include <time.h>\n#include <math.h>\n\n", out);
     fputs("__attribute__((unused)) static char *wstr_cat(const char *a, const char *b){\n"
           "    size_t la=strlen(a), lb=strlen(b);\n"
-          "    char *r=malloc(la+lb+1); memcpy(r,a,la); memcpy(r+la,b,lb+1); return r;\n}\n"
+          "    char *r=wind_str_alloc(la+lb+1); memcpy(r,a,la); memcpy(r+la,b,lb+1); return r;\n}\n"
           "__attribute__((unused)) static char *wstr_build(const char *fmt, ...){\n"
           "    va_list a, b; va_start(a, fmt); va_copy(b, a);\n"
           "    int n = vsnprintf(NULL, 0, fmt, a); va_end(a);\n"
-          "    char *r = malloc((size_t)n + 1); vsnprintf(r, (size_t)n + 1, fmt, b); va_end(b);\n"
+          "    char *r = wind_str_alloc((size_t)n + 1); vsnprintf(r, (size_t)n + 1, fmt, b); va_end(b);\n"
           "    return r;\n}\n"
           "__attribute__((unused)) static char *wstr_from_int(long v){\n"
           "    char t[32]; int n = snprintf(t, sizeof t, \"%ld\", v);\n"
-          "    char *r = malloc((size_t)n + 1); memcpy(r, t, (size_t)n + 1); return r;\n}\n"
+          "    char *r = wind_str_alloc((size_t)n + 1); memcpy(r, t, (size_t)n + 1); return r;\n}\n"
           "__attribute__((unused)) static char *wstr_from_frac(double v){\n"
           "    char t[64]; int n = snprintf(t, sizeof t, \"%g\", v);\n"
-          "    char *r = malloc((size_t)n + 1); memcpy(r, t, (size_t)n + 1); return r;\n}\n"
+          "    char *r = wind_str_alloc((size_t)n + 1); memcpy(r, t, (size_t)n + 1); return r;\n}\n"
           "__attribute__((unused)) static long   wstr_to_int(const char *s){ return strtol(s, NULL, 10); }\n"
           "__attribute__((unused)) static double wstr_to_frac(const char *s){ return strtod(s, NULL); }\n\n", out);
 
+    if (!g_gc_strings) {
     /* рантайм динамических списков */
     fputs("typedef struct { void *data; int len; int cap; int esz; } _wl;\n"
           "__attribute__((unused)) static _wl *_wl_new(int esz){\n"
@@ -1003,6 +1063,8 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap) {
           "__attribute__((unused)) static int _wd_has(_wd *d,uint64_t k){ uint64_t i=_wd_h(d,k)%(uint64_t)d->nb; for(_wde*e=d->b[i];e;e=e->next) if(_wd_eq(d,e->key,k)) return 1; return 0; }\n"
           "__attribute__((unused)) static int _wd_len(_wd *d){ return d->count; }\n\n", out);
     
+    }
+
     /* рантайм модуля time */
     fputs("__attribute__((unused)) static long _wtime_now(void){ return (long)time(NULL); }\n"
           "__attribute__((unused)) static double _wtime_clock(void){\n"
@@ -1012,6 +1074,7 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap) {
           "    struct timespec ts; ts.tv_sec=(time_t)s; ts.tv_nsec=(long)((s-(double)ts.tv_sec)*1e9);\n"
           "    nanosleep(&ts,NULL); }\n\n", out);
 
+    if (!g_gc_strings) {
     fputs("__attribute__((unused)) static char *_wf_read(const char *path){\n"
           "    FILE *f=fopen(path,\"rb\"); if(!f){ fprintf(stderr,\"file.read: cannot open %s\\n\",path); exit(1);} \n"
           "    fseek(f,0,SEEK_END); long sz=ftell(f); fseek(f,0,SEEK_SET); if(sz<0) sz=0;\n"
@@ -1158,6 +1221,8 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap) {
       "    if(write(cfd,hdr,(size_t)hn)>=0){ size_t bl=strlen(body),off=0; while(off<bl){ ssize_t ww=write(cfd,body+off,bl-off); if(ww<=0) break; off+=(size_t)ww; } }\n"
       "    close(cfd); }\n\n", out);
 
+    }
+
     /* forward-декларации функций (рекурсия/взаимные вызовы) */
     for (int i = 0; i < p->body.n; i++)
         if (p->body.items[i]->kind == ST_FUNC) {
@@ -1176,10 +1241,13 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap) {
             fputs("];\n", out);
         } else {
             WType t = (dt->kind == DT_INFER) ? infer(s->as.decl.init) : wt_base(dt->base);
-            fprintf(out, "%s %s;\n", ctype(t), s->as.decl.name);
+            fprintf(out, "%s %s%s;\n", ctype(t), s->as.decl.name,
+                    g_gc_strings && t == WT_STR ? " = \"\"" : "");
         }
     }
     fputs("\n", out);
+
+    int gc_globals = g_gc_strings ? emit_gc_global_roots(out) : 0;
 
     /* определения функций */
     for (int i = 0; i < p->body.n; i++)
@@ -1187,8 +1255,9 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap) {
 
     /* main: сперва инициализация глобалов, потом top-level инструкции */
     fputs("int main(void) {\n", out);
-    fputs("    GC_INIT();\n", out);
+    if (!g_gc_strings) fputs("    GC_INIT();\n", out);
     g_nloc = 0;
+    g_in_main = 1;
     for (int i = 0; i < p->body.n; i++) {
         Stmt *s = p->body.items[i];
         if (s->kind == ST_VAR_DECL && s->as.decl.is_global && s->as.decl.init) {
@@ -1203,7 +1272,9 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap) {
         if (s->kind == ST_FUNC) continue;
         if (s->kind == ST_VAR_DECL && s->as.decl.is_global) continue;  /* уже выше */
         emit_stmt(out, s, 1);
+        if (g_gc_strings) emit_gc_checkpoint(out, gc_globals);
     }
+    if (g_gc_strings) fputs("    wind_str_destroy();\n", out);
     indent(out, 1); fputs("return 0;\n}\n", out);
     return 1;
 }

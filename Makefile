@@ -20,7 +20,9 @@ $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) $(OBJS) -o $(TARGET)
 
 %.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+src/main.o: CPPFLAGS += -DWIND_RUNTIME_DIR='"$(abspath runtime)"'
 
 # Подключаем сгенерированные правила зависимостей.
 -include $(DEPS)
