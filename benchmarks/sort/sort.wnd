@@ -1,0 +1,43 @@
+global int.size = 8192
+global int.values[8192]
+
+func fill()
+    int.seed = 42
+    for i in 0..size
+        seed = seed * 25173 + 13849
+        seed = seed /% 65536
+        values[i] = seed
+    end
+end
+
+func insertion_sort()
+    for i in 1..size
+        int.value = values[i]
+        int.j = i
+        while j > 0 && values[j - 1] > value
+            values[j] = values[j - 1]
+            j -= 1
+        end
+        values[j] = value
+    end
+end
+
+func digest() -> int
+    int.hash = 0
+    for i in 0..size
+        hash = hash * 31 + values[i]
+        hash = hash /% 65536
+    end
+    return hash
+end
+
+repeat 2
+    fill()
+    insertion_sort()
+end
+fill()
+frac.started = time.clock()
+insertion_sort()
+frac.elapsed = time.clock() - started
+frac.elapsed_ms = elapsed * 1000
+terminal.paste -> "${elapsed_ms} ${digest()}"
