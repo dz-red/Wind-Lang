@@ -1,0 +1,8 @@
+func greet(str.name) -> str
+    return "Привет, " + name + "!"
+end
+
+str.message = greet("Wind")
+terminal.paste -> message
+message = "Длина сообщения: ${message.len} байт"
+terminal.paste -> message

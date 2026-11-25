@@ -35,7 +35,7 @@ gcc -std=c11 -Wall -Wextra -Werror runtime/gc.c tests/gc-heap.c -o /tmp/wind-gc-
 
 ```sh
 make
-./wind --gc-strings -s example.wnd
+./wind --gc-strings -s examples/gc-strings.wnd
 sh tests/gc-strings.sh
 ```
 
