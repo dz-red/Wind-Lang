@@ -59,17 +59,6 @@ static WType var_type(const char *name) {       /* скалярный тип п�
     VType v = var_vtype(name);
     return v.ck == CK_SCALAR ? v.elem : WT_UNKNOWN;
 }
-static WType wt_base(TokenKind t);
-/* полный тип коллекции по выражению-носителю (nums или int.nums) */
-static VType coll_vtype(const Expr *coll) {
-    if (coll->kind == EX_IDENT) return var_vtype(coll->as.ident);
-    if (coll->kind == EX_TYPED) {
-        VType v = var_vtype(coll->as.typed.name);
-        if (v.elem != WT_UNKNOWN) return v;
-        return vt_scalar(wt_base(coll->as.typed.type));   /* fallback на аннотацию {int.nums[i]} */
-    }
-    return vt_scalar(WT_UNKNOWN);
-}
 static WType func_ret(const char *name) {
     for (int i = 0; i < g_nfunc; i++) if (!strcmp(g_func[i].name, name)) return g_func[i].ret;
     return WT_UNKNOWN;
@@ -85,6 +74,40 @@ static WType wt_base(TokenKind t) {
         default:         return WT_UNKNOWN;
     }
 }
+static const char *wind_type_name(WType t) {
+    switch (t) {
+        case WT_INT:  return "int";
+        case WT_FRAC: return "frac";
+        case WT_STR:  return "str";
+        case WT_BOOL: return "bool";
+        case WT_JSON: return "json";
+        case WT_VOID: return "void";
+        default:      return "unknown";
+    }
+}
+
+/* Префикс проверяет тип из таблицы имён, а не заменяет его. */
+static VType typed_ref(const Expr *e) {
+    const char *name = e->as.typed.name;
+    WType prefix = wt_base(e->as.typed.type);
+    VType v = var_vtype(name);
+    if (v.elem == WT_UNKNOWN)
+        cg_fail("typed reference '%s.%s': variable '%s' is not declared",
+                wind_type_name(prefix), name, name);
+    if (v.elem != prefix)
+        cg_fail("typed reference '%s.%s': '%s' has %stype '%s'",
+                wind_type_name(prefix), name, name,
+                v.ck == CK_SCALAR ? "" : "element ", wind_type_name(v.elem));
+    return v;
+}
+
+/* полный тип коллекции по выражению-носителю (nums или int.nums) */
+static VType coll_vtype(const Expr *coll) {
+    if (coll->kind == EX_IDENT) return var_vtype(coll->as.ident);
+    if (coll->kind == EX_TYPED) return typed_ref(coll);
+    return vt_scalar(WT_UNKNOWN);
+}
+
 static const char *ctype(WType t) {
     switch (t) {
         case WT_INT: case WT_BOOL: return "int";
@@ -130,7 +153,10 @@ static WType infer(const Expr *e) {
         case EX_STR:    return WT_STR;
         case EX_INTERP: return WT_STR;
         case EX_IDENT:  return var_type(e->as.ident);
-        case EX_TYPED:  return wt_base(e->as.typed.type);
+        case EX_TYPED: {
+            VType v = typed_ref(e);
+            return v.ck == CK_SCALAR ? v.elem : WT_UNKNOWN;
+        }
         case EX_GROUP:  return infer(e->as.group.inner);
         case EX_UNARY:  return infer(e->as.unary.e);
         case EX_BINARY: return infer_binary(e);
@@ -296,7 +322,10 @@ static void emit_expr(FILE *o, const Expr *e) {
             break;
         }
         case EX_IDENT: fprintf(o, "%s", e->as.ident); break;
-        case EX_TYPED: fprintf(o, "%s", e->as.typed.name); break;   /* тип-префикс в C не нужен */
+        case EX_TYPED:
+            typed_ref(e);  /* вызов может напечатать аргумент, не запрашивая его тип */
+            fprintf(o, "%s", e->as.typed.name);
+            break;
         case EX_GROUP: fputc('(', o); emit_expr(o, e->as.group.inner); fputc(')', o); break;
         case EX_UNARY:
             fputc('(', o);
