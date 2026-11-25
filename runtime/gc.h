@@ -25,6 +25,9 @@ void *wind_gc_alloc_traced(WindGc *gc, size_t size, WindGcTrace trace);
    Корни и ссылки должны указывать на начало блока; NULL и чужие блоки игнорируются. */
 size_t wind_gc_collect(WindGc *gc, const void *const *roots, size_t count);
 
+/* Тот же сборщик, но корни перечисляет callback вместо массива. */
+size_t wind_gc_collect_with(WindGc *gc, const void *data, WindGcTrace trace_roots);
+
 /* Освобождает все блоки и оставляет кучу пустой. */
 void wind_gc_destroy(WindGc *gc);
 

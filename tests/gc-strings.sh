@@ -16,8 +16,29 @@ end
 func wrap(str.left, str.right) -> str
     return "<${left}|${right}>"
 end
+func spin(str.seed, int.n) -> str
+    str.last = seed
+    for i in 0..n
+        str.scoped = "${seed}:${i}"
+        if i == 0
+            continue
+        end
+        last = scoped
+        if i == n - 1
+            break
+        end
+    end
+    return last
+end
+func recurse(str.token, int.depth) -> str
+    str.current = "${token}:${depth}"
+    if depth == 0
+        return current
+    end
+    return wrap(current, recurse(token, depth - 1))
+end
 
-str.label = "local" + "!"
+str.label = label + " local"
 str.kept = wrap("a" + "b", "c" + "d")
 str.alias = kept
 kept = str(42)
@@ -29,42 +50,58 @@ end
 for label in 0..1
     str.scoped = str(label)
 end
+int.checks = 0
+while len(str(checks)) > 0 && checks < 32
+    checks += 1
+    continue
+end
 terminal.paste -> "${read_global()} ${label} ${alias} ${kept} ${len(empty)}"
+terminal.paste -> wrap(spin("left", 500), spin("right", 500))
+terminal.paste -> recurse("r", 2)
 EOF
 
 "$wind" --gc-strings strings.wnd
-expected='global! <<<local!|42>|42>|42> <ab|cd> 42 0'
+expected='global! <<<global! local|42>|42>|42> <ab|cd> 42 0
+<left:499|right:499>
+<r:2|<r:1|r:0>>'
 test "$(./app)" = "$expected"
 if readelf -d app | grep -Fq 'libgc.so'; then
     printf '%s\n' 'Unexpected dependency on Boehm GC' >&2
     exit 1
 fi
 
-# Observe the generated checkpoints, not just the final destroy.
+# Count live managed blocks to distinguish collection in loops from cleanup at exit.
 cat > wrap.c <<'EOF'
 #include <assert.h>
 #include "gc.h"
 
-size_t __real_wind_gc_collect(WindGc *, const void *const *, size_t);
-size_t __wrap_wind_gc_collect(WindGc *gc, const void *const *roots, size_t n);
-static size_t calls;
+void *__real_wind_gc_alloc(WindGc *, size_t);
+size_t __real_wind_gc_collect_with(WindGc *, const void *, WindGcTrace);
+static size_t live;
+static size_t collected;
 
-__attribute__((destructor)) static void check_calls(void) {
-    assert(calls == 8);
+__attribute__((destructor)) static void check_collection(void) {
+    assert(collected >= 1000);
 }
 
-size_t __wrap_wind_gc_collect(WindGc *gc, const void *const *roots, size_t n) {
-    size_t freed = __real_wind_gc_collect(gc, roots, n);
-    if (++calls == 2)
-        assert(freed == 2); /* Both temporary arguments of wrap are gone. */
-    if (calls == 8)
-        assert(freed == 1); /* The temporary interpolation used by print. */
+void *__wrap_wind_gc_alloc(WindGc *gc, size_t size) {
+    void *data = __real_wind_gc_alloc(gc, size);
+    if (data) ++live;
+    assert(live < 64); /* Each spin creates 500 strings. */
+    return data;
+}
+
+size_t __wrap_wind_gc_collect_with(WindGc *gc, const void *roots, WindGcTrace trace) {
+    size_t freed = __real_wind_gc_collect_with(gc, roots, trace);
+    assert(freed <= live);
+    live -= freed;
+    collected += freed;
     return freed;
 }
 EOF
 gcc -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -no-pie \
     -I "$runtime" output_ast.c "$runtime/gc.c" "$runtime/strings_gc.c" wrap.c \
-    -Wl,--wrap=wind_gc_collect -o app-sanitized
+    -Wl,--wrap=wind_gc_alloc,--wrap=wind_gc_collect_with -o app-sanitized
 test "$(ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 ./app-sanitized)" = "$expected"
 
 reject() {

@@ -31,7 +31,7 @@ static Sym      g_glob[256]; static int g_nglob;
 static Sym      g_loc[256];  static int g_nloc;     /* сбрасывается на каждую функцию/main */
 static FuncSig  g_func[256]; static int g_nfunc;
 static int      g_rep_id;                            /* уникальные счётчики repeat-циклов */
-static int      g_gc_strings, g_in_main;
+static int      g_gc_strings, g_in_main, g_gc_id;
 
 static void cg_fail(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
@@ -294,6 +294,13 @@ static const char *binop_c(TokenKind op) {
     }
 }
 
+static void emit_var_ref(FILE *o, const Expr *e, int read) {
+    const char *name = e->kind == EX_TYPED ? e->as.typed.name : e->as.ident;
+    WType t = e->kind == EX_TYPED ? typed_ref(e).elem : var_type(name);
+    if (g_gc_strings && read && t == WT_STR) fprintf(o, "WIND_STR_KEEP(%s)", name);
+    else fputs(name, o);
+}
+
 static void emit_expr(FILE *o, const Expr *e) {
     switch (e->kind) {
         case EX_INT:   fprintf(o, "%ld", e->as.ival); break;
@@ -322,10 +329,9 @@ static void emit_expr(FILE *o, const Expr *e) {
             fputc(')', o);
             break;
         }
-        case EX_IDENT: fprintf(o, "%s", e->as.ident); break;
+        case EX_IDENT:
         case EX_TYPED:
-            typed_ref(e);  /* вызов может напечатать аргумент, не запрашивая его тип */
-            fprintf(o, "%s", e->as.typed.name);
+            emit_var_ref(o, e, 1);
             break;
         case EX_GROUP: fputc('(', o); emit_expr(o, e->as.group.inner); fputc(')', o); break;
         case EX_UNARY:
@@ -512,12 +518,15 @@ static void emit_expr(FILE *o, const Expr *e) {
             }
             if (g_gc_strings && func_ret(fn) == WT_UNKNOWN)
                 cg_fail("--gc-strings: unknown function '%s'", fn);
+            int keep = g_gc_strings && func_ret(fn) == WT_STR;
+            if (keep) fputs("WIND_STR_KEEP(", o);
             fprintf(o, "%s(", fn);
             for (int i = 0; i < e->as.call.nargs; i++) {
                 if (i) fputs(", ", o);
                 emit_expr(o, e->as.call.args[i]);
             }
             fputc(')', o);
+            if (keep) fputc(')', o);
             break;
         }
         case EX_INDEX: {                              /* coll[idx]: массив / список / словарь */
@@ -566,6 +575,23 @@ static void emit_expr(FILE *o, const Expr *e) {
 static void emit_block(FILE *o, const Block *b, int ind);
 static void indent(FILE *o, int n) { for (int i = 0; i < n; i++) fputs("    ", o); }
 
+static void emit_full_expr(FILE *o, const Expr *e) {
+    if (g_gc_strings) fputs("WIND_STR_EXPR(", o);
+    emit_expr(o, e);
+    if (g_gc_strings) fputc(')', o);
+}
+
+static void emit_gc_root(FILE *o, const char *name, int ind) {
+    indent(o, ind);
+    fprintf(o, "WIND_STR_ROOT(%s, %d);\n", name, g_gc_id++);
+}
+
+static void emit_gc_checkpoint(FILE *o, int ind) {
+    if (!g_gc_strings) return;
+    indent(o, ind);
+    fputs("wind_str_collect();\n", o);
+}
+
 /* печать значения по типу (terminal.paste) */
 static void emit_print(FILE *o, const Expr *val, int ind) {
     WType t = infer(val);
@@ -579,8 +605,8 @@ static void emit_print(FILE *o, const Expr *val, int ind) {
     }
     indent(o, ind);
     fprintf(o, "printf(\"%s\\n\", ", fmt);
-    if (t == WT_INT || t == WT_BOOL) { fputs("(int)(", o); emit_expr(o, val); fputc(')', o); }
-    else emit_expr(o, val);
+    if (t == WT_INT || t == WT_BOOL) { fputs("(int)(", o); emit_full_expr(o, val); fputc(')', o); }
+    else emit_full_expr(o, val);
     fputs(");\n", o);
 }
 
@@ -666,17 +692,33 @@ static void emit_local_decl(FILE *o, const Stmt *s, int ind) {
         if (!s->as.decl.init) return;
         indent(o, ind);
         fprintf(o, "%s = ", s->as.decl.name);
-        emit_expr(o, s->as.decl.init);
+        emit_full_expr(o, s->as.decl.init);
         fputs(";\n", o);
         return;
     }
-    if (!g_gc_strings) sym_add(g_loc, &g_nloc, s->as.decl.name, vt_scalar(t));
+    if (g_gc_strings) {
+        int temporary = g_gc_id++;
+        if (s->as.decl.init) {
+            /* Вычисляем до объявления: имя может совпадать с глобальным. */
+            indent(o, ind);
+            fprintf(o, "%s _wind_init_%d = ", ctype(t), temporary);
+            emit_full_expr(o, s->as.decl.init);
+            fputs(";\n", o);
+        }
+        indent(o, ind);
+        fprintf(o, "%s %s = ", ctype(t), s->as.decl.name);
+        if (s->as.decl.init) fprintf(o, "_wind_init_%d", temporary);
+        else fputs(t == WT_STR ? "\"\"" : "0", o);
+        fputs(";\n", o);
+        sym_add(g_loc, &g_nloc, s->as.decl.name, vt_scalar(t));
+        if (t == WT_STR) emit_gc_root(o, s->as.decl.name, ind);
+        return;
+    }
+    sym_add(g_loc, &g_nloc, s->as.decl.name, vt_scalar(t));
     indent(o, ind);
     fprintf(o, "%s %s", ctype(t), s->as.decl.name);
     if (s->as.decl.init) { fputs(" = ", o); emit_expr(o, s->as.decl.init); }
-    else if (g_gc_strings) fputs(t == WT_STR ? " = \"\"" : " = 0", o);
     fputs(";\n", o);
-    if (g_gc_strings) sym_add(g_loc, &g_nloc, s->as.decl.name, vt_scalar(t));
 }
 
 static const char *assignop_c(TokenKind op) {
@@ -726,9 +768,10 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
             if (tgt->kind != EX_IDENT && tgt->kind != EX_TYPED && tgt->kind != EX_INDEX)
                 cg_fail("assignment supported to a variable or element a[i]");
             indent(o, ind);
-            emit_expr(o, tgt);
+            if (g_gc_strings) emit_var_ref(o, tgt, 0);
+            else emit_expr(o, tgt);
             fprintf(o, " %s ", assignop_c(s->as.assign.op));
-            emit_expr(o, s->as.assign.value);
+            emit_full_expr(o, s->as.assign.value);
             fputs(";\n", o);
             break;
         }
@@ -736,7 +779,7 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
             for (int i = 0; i < s->as.iff.nclauses; i++) {
                 indent(o, ind);
                 fputs(i == 0 ? "if (" : "else if (", o);
-                emit_expr(o, s->as.iff.clauses[i].cond);
+                emit_full_expr(o, s->as.iff.clauses[i].cond);
                 fputs(") {\n", o);
                 emit_block(o, &s->as.iff.clauses[i].body, ind + 1);
                 indent(o, ind); fputs("}\n", o);
@@ -750,7 +793,7 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
         }
         case ST_WHILE:
             indent(o, ind); fputs("while (", o);
-            emit_expr(o, s->as.whilel.cond); fputs(") {\n", o);
+            emit_full_expr(o, s->as.whilel.cond); fputs(") {\n", o);
             emit_block(o, &s->as.whilel.body, ind + 1);
             indent(o, ind); fputs("}\n", o);
             break;
@@ -758,7 +801,7 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
             int id = g_rep_id++;
             indent(o, ind);
             fprintf(o, "for (int __rep%d = 0; __rep%d < (", id, id);
-            emit_expr(o, s->as.repeatl.count);
+            emit_full_expr(o, s->as.repeatl.count);
             fprintf(o, "); __rep%d++) {\n", id);
             emit_block(o, &s->as.repeatl.body, ind + 1);
             indent(o, ind); fputs("}\n", o);
@@ -768,11 +811,20 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
             const char *v = s->as.forr.var;
             int before_loop = g_nloc;
             indent(o, ind);
-            fprintf(o, "for (int %s = (", v);
-            emit_expr(o, s->as.forr.from);
-            if (g_gc_strings) sym_add(g_loc, &g_nloc, v, vt_scalar(WT_INT));
+            if (g_gc_strings) {
+                int temporary = g_gc_id++;
+                fprintf(o, "int _wind_init_%d = ", temporary);
+                emit_full_expr(o, s->as.forr.from);
+                fputs(";\n", o);
+                indent(o, ind);
+                fprintf(o, "for (int %s = (_wind_init_%d", v, temporary);
+                sym_add(g_loc, &g_nloc, v, vt_scalar(WT_INT));
+            } else {
+                fprintf(o, "for (int %s = (", v);
+                emit_expr(o, s->as.forr.from);
+            }
             fprintf(o, "); %s < (", v);
-            emit_expr(o, s->as.forr.to);
+            emit_full_expr(o, s->as.forr.to);
             fprintf(o, "); %s++) {\n", v);
             if (!g_gc_strings) sym_add(g_loc, &g_nloc, v, vt_scalar(WT_INT));
             emit_block(o, &s->as.forr.body, ind + 1);
@@ -783,7 +835,7 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
         case ST_RETURN:
             if (g_gc_strings && g_in_main) cg_fail("--gc-strings: return is only allowed in a function");
             indent(o, ind); fputs("return", o);
-            if (s->as.ret.value) { fputc(' ', o); emit_expr(o, s->as.ret.value); }
+            if (s->as.ret.value) { fputc(' ', o); emit_full_expr(o, s->as.ret.value); }
             fputs(";\n", o);
             break;
         case ST_TRY: {
@@ -860,7 +912,7 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
         }
         case ST_EXPR:
             indent(o, ind);
-            emit_expr(o, s->as.expr.expr);
+            emit_full_expr(o, s->as.expr.expr);
             fputs(";\n", o);
             break;
         case ST_HTTP_SERVE: {
@@ -894,9 +946,17 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
     }
 }
 
+static void emit_stmt_at_checkpoint(FILE *o, const Stmt *s, int ind) {
+    emit_stmt(o, s, ind);
+    if (s->kind != ST_RETURN && s->kind != ST_BREAK && s->kind != ST_CONTINUE)
+        emit_gc_checkpoint(o, ind);
+}
+
 static void emit_block(FILE *o, const Block *b, int ind) {
     int before_block = g_nloc;
-    for (int i = 0; i < b->n; i++) emit_stmt(o, b->items[i], ind);
+    /* Освобождаем временные значения условия даже у пустого тела цикла. */
+    emit_gc_checkpoint(o, ind);
+    for (int i = 0; i < b->n; i++) emit_stmt_at_checkpoint(o, b->items[i], ind);
     if (g_gc_strings) g_nloc = before_block;
 }
 
@@ -916,33 +976,14 @@ static void emit_func(FILE *o, const Stmt *s) {
     emit_func_signature(o, s);
     fputs(" {\n", o);
     g_nloc = 0;  /* свежая область видимости */
-    for (int i = 0; i < s->as.func.nparams; i++)
-        sym_add(g_loc, &g_nloc, s->as.func.params[i].name, vt_scalar(wt_base(s->as.func.params[i].type)));
+    for (int i = 0; i < s->as.func.nparams; i++) {
+        const Param *p = &s->as.func.params[i];
+        WType t = wt_base(p->type);
+        sym_add(g_loc, &g_nloc, p->name, vt_scalar(t));
+        if (g_gc_strings && t == WT_STR) emit_gc_root(o, p->name, 1);
+    }
     emit_block(o, &s->as.func.body, 1);
     fputs("}\n\n", o);
-}
-
-/* Глобалы читаются вне main: одноимённая локальная переменная их не скрывает. */
-static int emit_gc_global_roots(FILE *out) {
-    int count = 0;
-    fputs("static void _wind_collect(size_t n, const void **roots) {\n", out);
-    for (int i = 0; i < g_nglob; i++) {
-        if (g_glob[i].vt.elem != WT_STR) continue;
-        fprintf(out, "    roots[n++] = %s;\n", g_glob[i].name);
-        count++;
-    }
-    fputs("    wind_str_collect(roots, n);\n}\n", out);
-    return count;
-}
-
-static void emit_gc_checkpoint(FILE *out, int globals) {
-    int locals = 0;
-    for (int i = 0; i < g_nloc; i++)
-        if (g_loc[i].vt.elem == WT_STR) locals++;
-    fprintf(out, "    _wind_collect(%d, (const void *[%d]){", locals, locals + globals + 1);
-    for (int i = 0; i < g_nloc; i++)
-        if (g_loc[i].vt.elem == WT_STR) fprintf(out, "%s, ", g_loc[i].name);
-    fputs("NULL});\n", out);
 }
 
 /* ---------- точка входа ---------- */
@@ -950,7 +991,7 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_s
     cg_err = errbuf; cg_errcap = errcap;
     g_nglob = g_nloc = g_nfunc = g_rep_id = 0;
     g_gc_strings = gc_strings;
-    g_in_main = 0;
+    g_in_main = g_gc_id = 0;
 
     if (setjmp(cg_jb)) return 0;
     if (g_gc_strings && p->nlinks) cg_fail("--gc-strings does not support link directives yet");
@@ -1247,8 +1288,6 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_s
     }
     fputs("\n", out);
 
-    int gc_globals = g_gc_strings ? emit_gc_global_roots(out) : 0;
-
     /* определения функций */
     for (int i = 0; i < p->body.n; i++)
         if (p->body.items[i]->kind == ST_FUNC) emit_func(out, p->body.items[i]);
@@ -1258,21 +1297,24 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_s
     if (!g_gc_strings) fputs("    GC_INIT();\n", out);
     g_nloc = 0;
     g_in_main = 1;
+    if (g_gc_strings)
+        for (int i = 0; i < g_nglob; i++)
+            if (g_glob[i].vt.elem == WT_STR) emit_gc_root(out, g_glob[i].name, 1);
     for (int i = 0; i < p->body.n; i++) {
         Stmt *s = p->body.items[i];
         if (s->kind == ST_VAR_DECL && s->as.decl.is_global && s->as.decl.init) {
             indent(out, 1);
             fprintf(out, "%s = ", s->as.decl.name);
-            emit_expr(out, s->as.decl.init);
+            emit_full_expr(out, s->as.decl.init);
             fputs(";\n", out);
+            emit_gc_checkpoint(out, 1);
         }
     }
     for (int i = 0; i < p->body.n; i++) {
         Stmt *s = p->body.items[i];
         if (s->kind == ST_FUNC) continue;
         if (s->kind == ST_VAR_DECL && s->as.decl.is_global) continue;  /* уже выше */
-        emit_stmt(out, s, 1);
-        if (g_gc_strings) emit_gc_checkpoint(out, gc_globals);
+        emit_stmt_at_checkpoint(out, s, 1);
     }
     if (g_gc_strings) fputs("    wind_str_destroy();\n", out);
     indent(out, 1); fputs("return 0;\n}\n", out);
