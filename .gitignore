@@ -1,10 +1,16 @@
 # артефакты сборки
-src/*.o
-src/*.d
 *.o
 *.d
 /wind
+/wind.exe
 /app
+/app.exe
 /app2
 /output.c
 /output_ast.c
+
+# Результаты локальных запусков примеров
+/wnd files/app
+/wnd files/app.exe
+/wnd files/output_ast.c
+/wnd files/world_report.json
