@@ -5,7 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* === Keyword table — порядок не важен === */
 static const struct { const char *word; TokenKind kind; } KEYWORDS[] = {
     {"link", TK_KW_LINK},
     {"use", TK_KW_USE},
@@ -38,9 +37,9 @@ static const struct { const char *word; TokenKind kind; } KEYWORDS[] = {
     {"return",   TK_KW_RETURN},
 
     {"func",     TK_KW_FUNC},
-    {"fn",       TK_KW_FUNC},          /* fn — синоним func */
+    {"fn",       TK_KW_FUNC},
     {"global",   TK_KW_GLOBAL},
-    {"var",      TK_KW_VAR},           /* var x = ... — тип выводится на этапе кодогена */
+    {"var",      TK_KW_VAR},
     {"class",    TK_KW_CLASS},
     {"on",       TK_KW_ON},
 
@@ -54,18 +53,16 @@ static TokenKind keyword_lookup(const char *word) {
     return TK_IDENT;
 }
 
-/* === Состояние лексера === */
 typedef struct {
     const char *src;
-    int pos;        /* индекс в src */
-    int line;       /* 1-based */
-    int col;        /* 1-based */
+    int pos;
+    int line;
+    int col;
     Token *out;
     int out_count;
     int out_cap;
 } Lexer;
 
-/* Безопасный peek/advance с обновлением line/col. */
 static char peek(Lexer *l) { return l->src[l->pos]; }
 static char peek_at(Lexer *l, int offset) { return l->src[l->pos + offset]; }
 
@@ -78,7 +75,6 @@ static char advance(Lexer *l) {
     return c;
 }
 
-/* Растим out-массив при необходимости. */
 static void emit(Lexer *l, Token t) {
     if (l->out_count >= l->out_cap) {
         l->out_cap = l->out_cap ? l->out_cap * 2 : 64;
@@ -99,9 +95,7 @@ static Token simple_tok(Lexer *l, TokenKind k, int start_line, int start_col) {
     return t;
 }
 
-/* === Лексинг отдельных конструкций === */
-
-/* Идентификатор/keyword. Начало уже проверено как isalpha/_. */
+/* Первый символ уже проверен. */
 static Token lex_ident(Lexer *l) {
     int sl = l->line, sc = l->col;
     int start = l->pos;
@@ -117,9 +111,9 @@ static Token lex_ident(Lexer *l) {
     TokenKind k = keyword_lookup(word);
     Token t = simple_tok(l, k, sl, sc);
     if (k == TK_IDENT) {
-        t.text = word;  /* identы тащим текст с собой */
+        t.text = word;
     } else {
-        free(word);     /* keyword'у текст не нужен */
+        free(word);
     }
     return t;
 }
@@ -132,7 +126,7 @@ static Token lex_number(Lexer *l) {
     int is_frac = 0;
     if (peek(l) == ',' && isdigit((unsigned char)peek_at(l, 1))) {
         is_frac = 1;
-        advance(l);  /* съели ',' */
+        advance(l);
         while (isdigit((unsigned char)peek(l))) advance(l);
     }
 
@@ -163,8 +157,8 @@ static Token lex_string(Lexer *l) {
     while (peek(l) && peek(l) != '"') {
         if (peek(l) == '\\' && peek_at(l, 1)) {
             has_escape = 1;
-            advance(l);  /* съели backslash */
-            advance(l);  /* съели следующий char */
+            advance(l);
+            advance(l);
         } else if (peek(l) == '\n') {
             /* Многострочные литералы — разрешаем (как в Wind было). */
             advance(l);
@@ -181,9 +175,8 @@ static Token lex_string(Lexer *l) {
         fprintf(stderr, "[lexer] %d:%d: unterminated string\n", sl, sc);
         return t;
     }
-    advance(l);  /* закрывающая " */
+    advance(l);
 
-    /* Распаковываем escape-последовательности если были. */
     char *text = (char *)malloc((size_t)len + 1);
     if (!text) { perror("malloc"); exit(1); }
     if (!has_escape) {
@@ -259,19 +252,16 @@ Token *wind_lex(const char *src, int *out_count) {
 
         int sl = l.line, sc = l.col;
 
-        /* Идентификатор / keyword */
         if (isalpha((unsigned char)c) || c == '_') {
             emit(&l, lex_ident(&l));
             continue;
         }
 
-        /* Число */
         if (isdigit((unsigned char)c)) {
             emit(&l, lex_number(&l));
             continue;
         }
 
-        /* Строка */
         if (c == '"') {
             emit(&l, lex_string(&l));
             continue;
@@ -331,7 +321,6 @@ Token *wind_lex(const char *src, int *out_count) {
             emit(&l, simple_tok(&l, TK_SLASH_EQ, sl, sc)); continue;
         }
 
-        /* Односимвольные */
         TokenKind k = TK_BAD;
         switch (c) {
             case '(': k = TK_LPAREN; break;
@@ -357,7 +346,6 @@ Token *wind_lex(const char *src, int *out_count) {
             continue;
         }
 
-        /* Неизвестный символ */
         fprintf(stderr, "[lexer] %d:%d: unexpected character '%c' (0x%02x)\n",
                 sl, sc, c, (unsigned char)c);
         advance(&l);
@@ -369,7 +357,6 @@ Token *wind_lex(const char *src, int *out_count) {
         emit(&l, simple_tok(&l, TK_NEWLINE, l.line, l.col));
     }
 
-    /* EOF */
     emit(&l, simple_tok(&l, TK_EOF, l.line, l.col));
 
     if (out_count) *out_count = l.out_count;

@@ -1,5 +1,4 @@
 #!/bin/sh
-# Linux: run from the repository root after make.
 set -eu
 
 wind=$(realpath "${1:-./wind}")

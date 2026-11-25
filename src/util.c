@@ -4,7 +4,7 @@
 #include <ctype.h>
 
 #include "util.h"
-#include "errors.h"   /* нужен current_file для func_name_conflicts_with_file */
+#include "errors.h"
 
 int in_comment = 0;
 
@@ -67,8 +67,6 @@ int levenshtein(const char *a, const char *b) {
     return result;
 }
 
-/* Список ключевых слов Wind — приватный для этого .c-файла, наружу не торчит.
- * Если бы хотели чтобы парсер тоже его видел — пришлось бы вынести в .h. */
 static const char *wind_keywords[] = {
     "int.", "frac.", "str.",
     "if", "else", "else if", "end if",

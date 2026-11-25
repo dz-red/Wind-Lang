@@ -1,12 +1,3 @@
-/*
- * Wind Language — VS Code extension.
- * Realtime diagnostics: при изменении .wnd буфера запускаем `./wind --check`
- * и парсим вывод в squiggly-подчёркивания (Problems panel + inline).
- *
- * Зависимости: только встроенные API (vscode, child_process, fs, path, os).
- * Никакого npm install не нужно.
- */
-
 const vscode = require('vscode');
 const { exec } = require('child_process');
 const fs = require('fs');
@@ -14,17 +5,15 @@ const path = require('path');
 const os = require('os');
 
 let diagCollection;
-let debounceTimers = new Map(); // doc URI → setTimeout handle
+let debounceTimers = new Map();
 const DEBOUNCE_MS = 400;
 
-/* Запущен ли VS Code в flatpak-sandbox. Тогда wind на хосте, нужен flatpak-spawn. */
 const IN_FLATPAK = fs.existsSync('/.flatpak-info');
 
 function activate(context) {
     diagCollection = vscode.languages.createDiagnosticCollection('wind');
     context.subscriptions.push(diagCollection);
 
-    /* При изменении — debounced check. */
     context.subscriptions.push(
         vscode.workspace.onDidChangeTextDocument(e => {
             if (e.document.languageId !== 'wind') return;
@@ -32,21 +21,18 @@ function activate(context) {
         })
     );
 
-    /* При открытии — сразу check. */
     context.subscriptions.push(
         vscode.workspace.onDidOpenTextDocument(doc => {
             if (doc.languageId === 'wind') checkDocument(doc);
         })
     );
 
-    /* При сохранении — сразу check (без debounce). */
     context.subscriptions.push(
         vscode.workspace.onDidSaveTextDocument(doc => {
             if (doc.languageId === 'wind') checkDocument(doc);
         })
     );
 
-    /* При закрытии — очистка diagnostics. */
     context.subscriptions.push(
         vscode.workspace.onDidCloseTextDocument(doc => {
             diagCollection.delete(doc.uri);
@@ -55,7 +41,6 @@ function activate(context) {
         })
     );
 
-    /* Initial check для всех уже открытых .wnd. */
     vscode.workspace.textDocuments.forEach(doc => {
         if (doc.languageId === 'wind') checkDocument(doc);
     });
@@ -91,7 +76,6 @@ function checkDocument(doc) {
         return;
     }
 
-    /* В sandbox запускаем wind через flatpak-spawn --host. */
     const cmd = IN_FLATPAK
         ? `flatpak-spawn --host "${windBin}" --check --errors-simple "${tmpFile}"`
         : `"${windBin}" --check --errors-simple "${tmpFile}"`;
@@ -104,7 +88,6 @@ function checkDocument(doc) {
     });
 }
 
-/* Ищем wind бинарник в той же папке или в одной из 5 parent. */
 function findProjectDir(filePath) {
     let dir = path.dirname(filePath);
     for (let i = 0; i < 5; i++) {
@@ -117,7 +100,6 @@ function findProjectDir(filePath) {
 }
 
 function parseDiagnostics(output, doc, tmpFile) {
-    /* Формат: file:line:col: error|note: message */
     const re = /^(.+?):(\d+):(\d+):\s*(error|note|warning):\s*(.+)$/gm;
     const lastError = new Map(); // line → { msg, range } для прикрепления note
     const diagnostics = [];
@@ -139,7 +121,6 @@ function parseDiagnostics(output, doc, tmpFile) {
                 prev.diag.message = prev.diag.message + ' (' + message + ')';
                 continue;
             }
-            /* note без предыдущей error — показываем как Information. */
             diagnostics.push(new vscode.Diagnostic(range, message,
                 vscode.DiagnosticSeverity.Information));
             continue;

@@ -1,5 +1,4 @@
 #!/bin/sh
-# Run from the repository root after building wind: sh tests/typed-references.sh
 set -eu
 
 wind=$(realpath "${1:-./wind}")

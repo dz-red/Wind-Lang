@@ -2,25 +2,23 @@
 #define WIND_AST_H
 
 #include <stdio.h>
-#include "lexer.h"   /* TokenKind */
-
-/* ======================= ВЫРАЖЕНИЯ ======================= */
+#include "lexer.h"
 
 typedef enum {
-    EX_INT,      /* 42                        */
-    EX_FRAC,     /* 3,14                      */
-    EX_STR,      /* "hello" (raw, без кавычек)*/
-    EX_INTERP,   /* "x={int.x}" — шаблон с {…} */
-    EX_IDENT,    /* counter, render, nums     */
-    EX_TYPED,    /* int.x, str.name (тип.имя) */
-    EX_DOT,      /* a.b   (obj . field)       */
-    EX_CALL,     /* f(args), a.b(args), int(x)*/
-    EX_INDEX,    /* coll[idx]                 */
-    EX_LIST,     /* [a, b, c]  / []           */
-    EX_DICT,     /* [k: v, ...]               */
-    EX_GROUP,    /* [expr]  — скобки группировки Wind */
-    EX_UNARY,    /* -x                        */
-    EX_BINARY,   /* a + b, a && b, a == b     */
+    EX_INT,
+    EX_FRAC,
+    EX_STR,
+    EX_INTERP,
+    EX_IDENT,
+    EX_TYPED,
+    EX_DOT,
+    EX_CALL,
+    EX_INDEX,
+    EX_LIST,
+    EX_DICT,
+    EX_GROUP,
+    EX_UNARY,
+    EX_BINARY,
 } ExprKind;
 
 typedef struct Expr Expr;
@@ -29,67 +27,63 @@ struct Expr {
     ExprKind kind;
     int line, col;
     union {
-        long   ival;                                  /* EX_INT   */
-        double fval;                                  /* EX_FRAC  */
-        char  *sval;                                  /* EX_STR   */
-        struct { char **lits; Expr **exprs; int n; } interp; /* EX_INTERP: n выраж., n+1 литералов */
-        char  *ident;                                 /* EX_IDENT */
-        struct { TokenKind type; char *name; } typed; /* EX_TYPED */
-        struct { Expr *obj; char *field; } dot;       /* EX_DOT   */
-        struct { Expr *callee; Expr **args; int nargs; } call;     /* EX_CALL  */
-        struct { Expr *coll; Expr *idx; } index;      /* EX_INDEX */
-        struct { Expr **items; int n; } list;         /* EX_LIST  */
-        struct { Expr **keys; Expr **vals; int n; } dict; /* EX_DICT */
-        struct { Expr *inner; } group;                /* EX_GROUP */
-        struct { TokenKind op; Expr *e; } unary;      /* EX_UNARY */
-        struct { TokenKind op; Expr *l, *r; } binary; /* EX_BINARY*/
+        long   ival;
+        double fval;
+        char  *sval;
+        struct { char **lits; Expr **exprs; int n; } interp; /* n выражений, n+1 литералов */
+        char  *ident;
+        struct { TokenKind type; char *name; } typed;
+        struct { Expr *obj; char *field; } dot;
+        struct { Expr *callee; Expr **args; int nargs; } call;
+        struct { Expr *coll; Expr *idx; } index;
+        struct { Expr **items; int n; } list;
+        struct { Expr **keys; Expr **vals; int n; } dict;
+        struct { Expr *inner; } group;
+        struct { TokenKind op; Expr *e; } unary;
+        struct { TokenKind op; Expr *l, *r; } binary;
     } as;
 };
 
-/* ======================= ТИП ДЕКЛАРАЦИИ ======================= */
-
 typedef enum {
-    DT_SCALAR,   /* int.x                */
-    DT_LIST,     /* int.list.nums        */
-    DT_DICT,     /* dict[str,int].cfg    */
-    DT_ARRAY,    /* int.nums[5]          */
-    DT_INFER,    /* var x = ... — тип выводится в кодогене */
+    DT_SCALAR,
+    DT_LIST,
+    DT_DICT,
+    DT_ARRAY,
+    DT_INFER,
 } DeclKind;
 
 typedef struct {
     DeclKind  kind;
-    TokenKind base;        /* элемент: KW_INT/KW_FRAC/KW_STR (scalar/list/array) */
-    TokenKind key;         /* DT_DICT: тип ключа   */
-    TokenKind val;         /* DT_DICT: тип значения*/
-    Expr     *array_size;  /* DT_ARRAY: размер     */
+    TokenKind base;
+    TokenKind key;
+    TokenKind val;
+    Expr     *array_size;
 } DeclType;
-
-/* ======================= ИНСТРУКЦИИ ======================= */
 
 typedef struct Stmt Stmt;
 
-typedef struct { Stmt **items; int n; } Block;          /* тело блока */
-typedef struct { TokenKind type; char *name; } Param;    /* параметр func: int.x */
-typedef struct { Expr *path; Expr *handler; } Route;     /* on "/" -> home | on "/" -> json.encode(...) */
-typedef struct { Expr *cond; Block body; } IfClause;     /* if/else-if ветка */
+typedef struct { Stmt **items; int n; } Block;
+typedef struct { TokenKind type; char *name; } Param;
+typedef struct { Expr *path; Expr *handler; } Route;
+typedef struct { Expr *cond; Block body; } IfClause;
 
 typedef enum {
-    ST_VAR_DECL,   /* [global] <type>.name [= init]   */
-    ST_ASSIGN,     /* lvalue с op= (=, +=, -=, ...)    */
-    ST_IF,         /* if/else if/else ... end         */
-    ST_WHILE,      /* while cond ... end              */
-    ST_REPEAT,     /* repeat N ... end                */
-    ST_LOOP,       /* loop v in coll ... end          */
-    ST_FOR,        /* for i in 0..N ... end           */
-    ST_FUNC,       /* func name(params) -> ret ... end*/
-    ST_RETURN,     /* return [expr]                   */
+    ST_VAR_DECL,
+    ST_ASSIGN,
+    ST_IF,
+    ST_WHILE,
+    ST_REPEAT,
+    ST_LOOP,
+    ST_FOR,
+    ST_FUNC,
+    ST_RETURN,
     ST_BREAK,
     ST_CONTINUE,
-    ST_TRY,        /* try ... catch e ... end         */
-    ST_THROW,      /* throw expr                      */
-    ST_HTTP_SERVE, /* http.serve PORT ... end         */
-    ST_OUTPUT,     /* terminal.paste -> expr          */
-    ST_EXPR,       /* bare выражение (вызов/метод)    */
+    ST_TRY,
+    ST_THROW,
+    ST_HTTP_SERVE,
+    ST_OUTPUT,
+    ST_EXPR,
 } StmtKind;
 
 struct Stmt {
@@ -114,9 +108,9 @@ struct Stmt {
 };
 
 typedef struct {
-    char *module; /*"math" имя без расширения*/
-    char **names; /*массив имён*/
-    int    nnames; /*вкурить сколько имён в массиве*/
+    char *module;
+    char **names;
+    int    nnames;
 } Import;
 
 typedef struct { 
@@ -126,8 +120,6 @@ typedef struct {
     Import imports[32];
     int nimports;
 } Program;
-
-/* ======================= КОНСТРУКТОРЫ ======================= */
 
 Expr *ast_int   (long v,   int line, int col);
 Expr *ast_frac  (double v, int line, int col);
@@ -144,20 +136,15 @@ Expr *ast_group (Expr *inner, int line, int col);
 Expr *ast_unary (TokenKind op, Expr *e, int line, int col);
 Expr *ast_binary(TokenKind op, Expr *l, Expr *r, int line, int col);
 
-Stmt *ast_stmt(StmtKind kind, int line, int col);  /* пустой узел нужного вида */
+Stmt *ast_stmt(StmtKind kind, int line, int col);
 
-/* добавить узел в блок (растущий массив) */
 void block_push(Block *b, Stmt *s);
 void exprvec_push(Expr ***arr, int *n, int *cap, Expr *e);
-
-/* ======================= ОСВОБОЖДЕНИЕ ======================= */
 
 void ast_free_expr(Expr *e);
 void ast_free_stmt(Stmt *s);
 void ast_free_block(Block *b);
 void ast_free_program(Program *p);
-
-/* ======================= ОТЛАДОЧНЫЙ ВЫВОД ======================= */
 
 void ast_dump_program(const Program *p, FILE *out);
 

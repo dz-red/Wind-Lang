@@ -9,8 +9,6 @@
 #define MAX_LOADED 64
 #define PATH_MAX_W 1024
 
-/* ---------- список уже загруженных: защита от повторов и циклов ---------- */
-
 static char *loaded[MAX_LOADED];
 static int   nloaded = 0;
 
@@ -34,10 +32,6 @@ static void forget_all(void) {
     nloaded = 0;
 }
 
-/* ---------- мелкие помощники ---------- */
-
-/* Каталог, в котором лежит файл, вместе с завершающим разделителем.
-   "C:\proj\demo.wnd" -> "C:\proj\";  "demo.wnd" -> "" */
 static void dir_of(const char *path, char *out, size_t cap) {
     snprintf(out, cap, "%s", path);
     char *slash = strrchr(out, '/');
@@ -66,7 +60,6 @@ static char *read_whole_file(const char *path) {
     return buf;
 }
 
-/* Ищет функцию с таким именем среди уже собранных в программе. */
 static Stmt *find_func(const Program *p, const char *name) {
     for (int i = 0; i < p->body.n; i++) {
         Stmt *s = p->body.items[i];
@@ -76,7 +69,6 @@ static Stmt *find_func(const Program *p, const char *name) {
     return NULL;
 }
 
-/* Есть ли имя в списке? */
 static int name_listed(char **list, int n, const char *name) {
     for (int i = 0; i < n; i++)
         if (strcmp(list[i], name) == 0) return 1;
@@ -84,13 +76,10 @@ static int name_listed(char **list, int n, const char *name) {
 }
 
 
-/* ---------- собственно загрузка ---------- */
 
 static int load_one(Program *prog, const char *dir, const char *module,
                     char *errbuf, int errcap);
 
-/* Обрабатывает все импорты одной Program. Вынесено отдельно, потому что
-   зовётся и для главного файла, и рекурсивно для каждого модуля. */
 static int load_imports_of(Program *prog, const Program *src,
                            const char *dir, char *errbuf, int errcap) {
     for (int i = 0; i < src->nimports; i++) {
@@ -102,7 +91,7 @@ static int load_imports_of(Program *prog, const Program *src,
 
 static int load_one(Program *prog, const char *dir, const char *module,
                     char *errbuf, int errcap) {
-    if (already_loaded(module)) return 1;   /* уже втянули — и цикл, и повтор */
+    if (already_loaded(module)) return 1;
     mark_loaded(module);                    /* метим ДО разбора: иначе a->b->a зациклится */
 
     char path[PATH_MAX_W];
@@ -127,15 +116,13 @@ static int load_one(Program *prog, const char *dir, const char *module,
         return 0;
     }
 
-    /* Сначала вложенные импорты модуля, потом он сам. */
     if (!load_imports_of(prog, &sub, dir, errbuf, errcap)) {
         wind_tokens_free(toks, ntok);
         free(src);
         return 0;
     }
 
-    /* Функции переезжают в главную программу, остальное выбрасываем. */
-    char *fnames[128];      /* имена функций ЭТОГО модуля — для проверки take */
+    char *fnames[128];
     int   nfn   = 0;
     int   taken = 0;
 
@@ -144,7 +131,7 @@ static int load_one(Program *prog, const char *dir, const char *module,
         if (!s) continue;
 
         if (s->kind != ST_FUNC) {
-            ast_free_stmt(s);          /* код верхнего уровня модуля не нужен */
+            ast_free_stmt(s);
             continue;
         }
 
@@ -163,13 +150,11 @@ static int load_one(Program *prog, const char *dir, const char *module,
     }
     free(sub.body.items);
 
-    /* link-директивы модуля тоже нужны, иначе gcc не найдёт библиотеку. */
     for (int i = 0; i < sub.nlinks; i++) {
         if (prog->nlinks < 32) prog->links[prog->nlinks++] = sub.links[i];
         else                   free(sub.links[i]);
     }
 
-        /* Всё, что просили через `take ... from <этот модуль>`, обязано в нём быть. */
     for (int i = 0; i < prog->nimports; i++) {
         Import *im = &prog->imports[i];
         if (im->names == NULL) continue;
@@ -198,8 +183,6 @@ int wind_load_modules(Program *prog, const char *base_path,
 
     forget_all();
 
-    /* Копируем импорты главного файла: prog->body будет расти во время
-       загрузки, но nimports не меняется, так что читать можно прямо из prog. */
     int ok = load_imports_of(prog, prog, dir, errbuf, errcap);
 
     forget_all();

@@ -15,8 +15,6 @@ typedef struct {
     int     eline, ecol;
 } P;
 
-/* ---------- утилиты ---------- */
-
 static char *dup_s(const char *s) {
     size_t n = (s ? strlen(s) : 0) + 1;
     char *r = (char *)malloc(n);
@@ -67,7 +65,6 @@ static void expect_eol(P *p) {
     if (cur(p) == TK_EOF) return;
     perr(p, "expected end of line, got %s", wind_token_kind_name(cur(p)));
 }
-/* `end` закрывает текущий блок; старый суффикс можно указать явно. */
 static void consume_end(P *p, TokenKind opener, const char *name) {
     expect(p, TK_KW_END, "end");
     if (cur(p) != TK_NEWLINE && cur(p) != TK_EOF) {
@@ -95,13 +92,11 @@ static TokenKind expect_scalar_type(P *p, const char *what) {
     return adv(p)->kind;
 }
 
-/* ---------- forward ---------- */
 static Expr  *parse_expr(P *p);
 static Expr  *parse_postfix(P *p);
 static Block  parse_block(P *p);
 static Stmt  *parse_stmt(P *p);
 
-/* ---------- аргументы вызова: ( e, e, ... ) ---------- */
 static Expr **parse_args(P *p, int *out_n) {
     expect(p, TK_LPAREN, "(");
     Expr **args = NULL; int n = 0, cap = 0;
@@ -129,7 +124,7 @@ static Expr *parse_bracket(P *p) {
     Expr *first = parse_expr(p);
     skipnl(p);
 
-    if (cur(p) == TK_COLON) {                 /* dict */
+    if (cur(p) == TK_COLON) {
         adv(p); skipnl(p);
         Expr **keys = NULL, **vals = NULL;
         int nk = 0, kcap = 0, nv = 0, vcap = 0;
@@ -151,7 +146,7 @@ static Expr *parse_bracket(P *p) {
         return ast_dict(keys, vals, nk, lb->line, lb->col);
     }
 
-    if (cur(p) == TK_COMMA) {                 /* list */
+    if (cur(p) == TK_COMMA) {
         Expr **items = NULL; int n = 0, cap = 0;
         exprvec_push(&items, &n, &cap, first);
         while (accept(p, TK_COMMA)) {
@@ -162,7 +157,6 @@ static Expr *parse_bracket(P *p) {
         expect(p, TK_RBRACKET, "]");
         return ast_list(items, n, lb->line, lb->col);
     }
-    /* одиночное выражение → скобки группировки */
     expect(p, TK_RBRACKET, "]");
     return ast_group(first, lb->line, lb->col);
 }
@@ -173,8 +167,6 @@ static const char *scalar_type_word(TokenKind k) {
                  default: return "?"; }
 }
 
-/* ---------- интерполяция строк "...{expr}..." ---------- */
-
 static void strvec_push(char ***arr, int *n, int *cap, char *s) {
     if (*n >= *cap) {
         *cap = *cap ? *cap * 2 : 4;
@@ -184,8 +176,6 @@ static void strvec_push(char ***arr, int *n, int *cap, char *s) {
     (*arr)[(*n)++] = s;
 }
 
-/* Разбирает текст одного плейсхолдера через полноценный parse_expr
- * (вложенный лексер+парсер). Ошибки внутри {…} пробрасываются наружу. */
 static Expr *parse_interp_placeholder(P *p, const char *inner, int line, int col) {
     while (*inner == ' ' || *inner == '\t') inner++;
     if (!*inner) { p->eline = line; p->ecol = col; perr(p, "empty braces {} in string"); }
@@ -196,7 +186,7 @@ static Expr *parse_interp_placeholder(P *p, const char *inner, int line, int col
     memset(&sub, 0, sizeof sub);
     sub.toks = toks; sub.count = nt; sub.pos = 0;
 
-    if (setjmp(sub.jb)) {                 /* ошибка во вложенном разборе */
+    if (setjmp(sub.jb)) {
         char msg[256];
         snprintf(msg, sizeof msg, "%s", sub.err);
         wind_tokens_free(toks, nt);
@@ -210,12 +200,11 @@ static Expr *parse_interp_placeholder(P *p, const char *inner, int line, int col
         p->eline = line; p->ecol = col;
         perr(p, "extra tokens in {…}: %s", wind_token_kind_name(extra));
     }
-    wind_tokens_free(toks, nt);           /* выражение сделало dup_s текстов — токены не нужны */
+    wind_tokens_free(toks, nt);
     return e;
 }
 
-/* Строковый литерал: если есть ${…} — строим EX_INTERP, иначе EX_STR.
- * Одиночные { } теперь литеральны (JSON/CSS пишутся без экранирования). */
+/* Только ${…} начинает интерполяцию; одиночные скобки остаются текстом. */
 static Expr *parse_string_literal(P *p, const char *raw, int line, int col) {
     if (!raw || !strstr(raw, "${"))
         return ast_str(dup_s(raw ? raw : ""), line, col);
@@ -234,7 +223,7 @@ static Expr *parse_string_literal(P *p, const char *raw, int line, int col) {
             if (!close) { free(buf); p->eline = line; p->ecol = col;
                           perr(p, "unclosed ${ in string (missing '}')"); }
             buf[bi] = '\0';
-            strvec_push(&lits, &nlit, &litcap, dup_s(buf));   /* флашим литерал */
+            strvec_push(&lits, &nlit, &litcap, dup_s(buf));
             bi = 0;
 
             size_t inner_len = (size_t)(close - (s + 2));
@@ -250,10 +239,10 @@ static Expr *parse_string_literal(P *p, const char *raw, int line, int col) {
         }
     }
     buf[bi] = '\0';
-    strvec_push(&lits, &nlit, &litcap, dup_s(buf));           /* хвостовой литерал */
+    strvec_push(&lits, &nlit, &litcap, dup_s(buf));
     free(buf);
 
-    return ast_interp(lits, exprs, nexp, line, col);          /* nlit == nexp+1 по построению */
+    return ast_interp(lits, exprs, nexp, line, col);
 }
 
 static Expr *parse_primary(P *p) {
@@ -268,12 +257,12 @@ static Expr *parse_primary(P *p) {
         case TK_LBRACKET: return parse_bracket(p);
         case TK_KW_INT: case TK_KW_FRAC: case TK_KW_STR: case TK_KW_BOOL: {
             TokenKind ty = cur(p); adv(p);
-            if (cur(p) == TK_LPAREN) {         /* каст: int(expr) */
+            if (cur(p) == TK_LPAREN) {
                 int n = 0; Expr **args = parse_args(p, &n);
                 Expr *callee = ast_ident(dup_s(scalar_type_word(ty)), t->line, t->col);
                 return ast_call(callee, args, n, t->line, t->col);
             }
-            if (accept(p, TK_DOT)) {           /* типизированное имя: int.x */
+            if (accept(p, TK_DOT)) {
                 Token *nm = expect(p, TK_IDENT, "name after type.");
                 return ast_typed(ty, dup_s(nm->text), t->line, t->col);
             }
@@ -285,7 +274,6 @@ static Expr *parse_primary(P *p) {
     return NULL; /* недостижимо */
 }
 
-/* постфиксы: вызов (), индексация [], доступ .field */
 static Expr *parse_postfix(P *p) {
     Expr *e = parse_primary(p);
     for (;;) {
@@ -371,7 +359,6 @@ static Expr *parse_expr(P *p) {
     return l;
 }
 
-/* ---------- объявление/типизированное присваивание ---------- */
 static Stmt *parse_decl(P *p, int is_global, int line, int col) {
     TokenKind ty = cur(p);
 
@@ -390,7 +377,6 @@ static Stmt *parse_decl(P *p, int is_global, int line, int col) {
         s->as.decl.dtype.key = kty;
         s->as.decl.dtype.val = vty;
         s->as.decl.name = dup_s(nm->text);
-        /* dict[..].name["k"] = v  — присваивание элемента с префиксом */
         if (cur(p) == TK_LBRACKET) {
             adv(p);
             Expr *idx = parse_expr(p);
@@ -410,7 +396,7 @@ static Stmt *parse_decl(P *p, int is_global, int line, int col) {
         return s;
     }
 
-    if (ty == TK_KW_LIST) {                       /* list[int].nums [= [..]] */
+    if (ty == TK_KW_LIST) {
         adv(p);
         expect(p, TK_LBRACKET, "[");
         TokenKind ety = expect_scalar_type(p, "list element type");
@@ -427,7 +413,7 @@ static Stmt *parse_decl(P *p, int is_global, int line, int col) {
         return s;
     }
 
-    if (ty == TK_KW_ARRAY) {                      /* array[int,5].nums */
+    if (ty == TK_KW_ARRAY) {
         adv(p);
         expect(p, TK_LBRACKET, "[");
         TokenKind ety = expect_scalar_type(p, "array element type");
@@ -446,7 +432,6 @@ static Stmt *parse_decl(P *p, int is_global, int line, int col) {
         return s;
     }
 
-    /* scalar / list / array (старые формы int.list.nums / int.nums[5]), базовый тип int|frac|str|bool */
     if (!is_scalar_type(ty))
         perr(p, "expected declaration type, got %s", wind_token_kind_name(ty));
     adv(p);
@@ -463,7 +448,7 @@ static Stmt *parse_decl(P *p, int is_global, int line, int col) {
         adv(p);
         Expr *idx = parse_expr(p);
         expect(p, TK_RBRACKET, "]");
-        if (accept(p, TK_ASSIGN)) {                 /* a[i] = v — запись элемента */
+        if (accept(p, TK_ASSIGN)) {
             Expr *val = parse_expr(p);
             expect_eol(p);
             Stmt *a = ast_stmt(ST_ASSIGN, line, col);
@@ -472,7 +457,6 @@ static Stmt *parse_decl(P *p, int is_global, int line, int col) {
             a->as.assign.value = val;
             return a;
         }
-        /* объявление статического массива int.nums[5] */
         expect_eol(p);
         Stmt *s = ast_stmt(ST_VAR_DECL, line, col);
         s->as.decl.is_global = is_global;
@@ -493,7 +477,6 @@ static Stmt *parse_decl(P *p, int is_global, int line, int col) {
     return s;
 }
 
-/* var x = expr — тип выводится в кодогене */
 static Stmt *parse_var(P *p, int line, int col) {
     expect(p, TK_KW_VAR, "var");
     Token *nm = expect(p, TK_IDENT, "variable name");
@@ -507,7 +490,6 @@ static Stmt *parse_var(P *p, int line, int col) {
     return s;
 }
 
-/* ---------- управляющие конструкции ---------- */
 static void ifclause_push(IfClause **arr, int *n, int *cap, Expr *cond, Block body) {
     if (*n >= *cap) {
         *cap = *cap ? *cap * 2 : 4;
@@ -528,12 +510,12 @@ static Stmt *parse_if(P *p, int line, int col) {
 
     while (cur(p) == TK_KW_ELSE) {
         adv(p);
-        if (cur(p) == TK_KW_IF) {                 /* else if */
+        if (cur(p) == TK_KW_IF) {
             adv(p);
             Expr *c2 = parse_expr(p); expect_eol(p);
             Block b2 = parse_block(p);
             ifclause_push(&clauses, &n, &cap, c2, b2);
-        } else {                                  /* else */
+        } else {
             expect_eol(p);
             else_b = parse_block(p);
             has_else = 1;
@@ -626,7 +608,7 @@ static Stmt *parse_func(P *p, int line, int col) {
     }
     skipnl(p);
     expect(p, TK_RPAREN, ")");
-    TokenKind ret = TK_KW_VOID;                   /* без стрелки -> void; тип только через -> */
+    TokenKind ret = TK_KW_VOID;
     if (accept(p, TK_ARROW)) {
         if (!is_scalar_type(cur(p)) && cur(p) != TK_KW_VOID)
             perr(p, "expected return type after '->', got %s", wind_token_kind_name(cur(p)));
@@ -679,7 +661,6 @@ static Stmt *parse_throw(P *p, int line, int col) {
     return s;
 }
 
-/* terminal.paste -> expr */
 static Stmt *parse_output(P *p, int line, int col) {
     Token *obj = expect(p, TK_IDENT, "terminal");
     expect(p, TK_DOT, ".");
@@ -693,7 +674,6 @@ static Stmt *parse_output(P *p, int line, int col) {
     return s;
 }
 
-/* http.serve PORT \n on "path" -> handler \n ... end */
 static Stmt *parse_http_serve(P *p, int line, int col) {
     expect(p, TK_IDENT, "http"); expect(p, TK_DOT, "."); expect(p, TK_IDENT, "serve");
     Expr *port = parse_expr(p);
@@ -721,7 +701,6 @@ static Stmt *parse_http_serve(P *p, int line, int col) {
     return s;
 }
 
-/* присваивание (x=, nums[i]=, ...) или голое выражение-инструкция (вызов) */
 static Stmt *parse_assign_or_expr(P *p, int line, int col) {
     Expr *lhs = parse_postfix(p);
     TokenKind k = cur(p);
@@ -740,7 +719,6 @@ static Stmt *parse_assign_or_expr(P *p, int line, int col) {
     return s;
 }
 
-/* ---------- инструкция / блок ---------- */
 static int at_block_end(P *p) {
     TokenKind k = cur(p);
     return k == TK_KW_END || k == TK_KW_ELSE || k == TK_KW_CATCH || k == TK_EOF;
@@ -794,7 +772,6 @@ static Stmt *parse_stmt(P *p) {
     return NULL; /* недостижимо */
 }
 
-/* ---------- точка входа ---------- */
 int wind_parse(Token *toks, int count, Program *out,
                char *errbuf, int errcap, int *out_line, int *out_col) {
     P p;
@@ -816,7 +793,6 @@ int wind_parse(Token *toks, int count, Program *out,
 
     skipnl(&p);
     while (cur(&p) != TK_EOF) {
-        /* top-level `link "lib"` directive: record the library name */
         if (cur(&p) == TK_KW_LINK) {
             adv(&p);
             if (cur(&p) != TK_STR_LIT) {
@@ -832,7 +808,6 @@ int wind_parse(Token *toks, int count, Program *out,
             skipnl(&p);
             continue;
         }
-        /* use math — тянем весь модуль */
         if (cur(&p) == TK_KW_USE) {
             adv(&p);
             Token *m = expect(&p, TK_IDENT, "module name after 'use'");
@@ -847,7 +822,6 @@ int wind_parse(Token *toks, int count, Program *out,
             continue;
         }
 
-        /* take a, b from math — тянем только перечисленное */
         if (cur(&p) == TK_KW_TAKE) {
             adv(&p);
 

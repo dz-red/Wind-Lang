@@ -1,7 +1,6 @@
 #ifndef WIND_ERRORS_H
 #define WIND_ERRORS_H
 
-/* ANSI-цвета для сообщений компилятора. */
 #define C_RST "\033[0m"
 #define C_RED "\033[1;31m"
 #define C_GRN "\033[1;32m"

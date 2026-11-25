@@ -3,7 +3,6 @@
 #include <stdbool.h>
 #include <stdlib.h>
 
-/* Запись списка и память, которую получает вызывающий, — разные блоки. */
 struct WindGcBlock {
     void *data;
     struct WindGcBlock *next;
@@ -28,7 +27,6 @@ void *wind_gc_alloc_traced(WindGc *gc, size_t size, WindGcTrace trace) {
         return NULL;
     }
 
-    /* Новая запись становится головой; старая остаётся следующей. */
     block->next = gc->head;
     block->trace = trace;
     block->marked = false;
@@ -48,7 +46,7 @@ static void mark(void *context, const void *ref) {
 
     for (struct WindGcBlock *block = state->gc->head; block; block = block->next) {
         if (block->data != ref) continue;
-        if (block->marked) return; /* повторный корень или цикл */
+        if (block->marked) return;
 
         block->marked = true;
         if (block->trace) {
@@ -79,7 +77,7 @@ static size_t finish_collection(MarkState *state) {
     while (*link) {
         struct WindGcBlock *block = *link;
         if (block->marked) {
-            block->marked = false; /* следующая сборка начнёт с чистых меток */
+            block->marked = false;
             link = &block->next;
         } else {
             *link = block->next;

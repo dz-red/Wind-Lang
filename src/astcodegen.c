@@ -1,8 +1,3 @@
-/*
- * astcodegen.c — генерация C из AST.
- * Что именно поддержано — см. astcodegen.h.
- */
-
 #include <setjmp.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -11,15 +6,12 @@
 
 #include "astcodegen.h"
 
-/* ---------- типы Wind для вывода ---------- */
 typedef enum { WT_INT, WT_FRAC, WT_STR, WT_VOID, WT_BOOL, WT_JSON, WT_UNKNOWN } WType;
 
-/* Полный тип переменной: скаляр или коллекция. */
 typedef enum { CK_SCALAR, CK_ARRAY, CK_LIST, CK_DICT } CKind;
 typedef struct { CKind ck; WType elem; WType key; } VType;  /* elem: тип элемента/значения; key: ключ dict */
 static VType vt_scalar(WType t) { VType v; v.ck = CK_SCALAR; v.elem = t; v.key = WT_UNKNOWN; return v; }
 
-/* ---------- состояние кодогена (компилятор однопоточный → статики ок) ---------- */
 typedef struct { char name[64]; VType vt; } Sym;
 typedef struct { char name[64]; WType ret;  } FuncSig;
 
@@ -40,13 +32,11 @@ static void cg_fail(const char *fmt, ...) {
     longjmp(cg_jb, 1);
 }
 
-/* ---------- symtab ---------- */
 static void sym_add(Sym *arr, int *n, const char *name, VType vt) {
     if (*n >= 256) cg_fail("too many variables");
     snprintf(arr[*n].name, sizeof arr[*n].name, "%s", name);
     arr[*n].vt = vt; (*n)++;
 }
-/* объявлена ли переменная в текущей области видимости */
 static int local_declared(const char *name) {
     for (int i = g_nloc - 1; i >= 0; i--) if (!strcmp(g_loc[i].name, name)) return 1;
     return 0;
@@ -56,7 +46,7 @@ static VType var_vtype(const char *name) {
     for (int i = g_nglob - 1; i >= 0; i--) if (!strcmp(g_glob[i].name, name)) return g_glob[i].vt;
     return vt_scalar(WT_UNKNOWN);
 }
-static WType var_type(const char *name) {       /* скалярный тип переменной (или элемент, если не коллекция) */
+static WType var_type(const char *name) {
     VType v = var_vtype(name);
     return v.ck == CK_SCALAR ? v.elem : WT_UNKNOWN;
 }
@@ -102,7 +92,6 @@ static VType typed_ref(const Expr *e) {
     return v;
 }
 
-/* полный тип коллекции по выражению-носителю (nums или int.nums) */
 static VType coll_vtype(const Expr *coll) {
     if (coll->kind == EX_IDENT) return var_vtype(coll->as.ident);
     if (coll->kind == EX_TYPED) return typed_ref(coll);
@@ -119,7 +108,6 @@ static const char *ctype(WType t) {
         default: cg_fail("unknown type in codegen"); return "?";
     }
 }
-/* суффикс рантайм-функций списка по типу элемента: _wl_get_int/_frac/_str */
 static const char *list_suffix(WType t) {
     switch (t) {
         case WT_INT: case WT_BOOL: return "int";
@@ -129,7 +117,6 @@ static const char *list_suffix(WType t) {
     }
 }
 
-/* ---------- вывод типа выражения ---------- */
 static WType infer(const Expr *e);
 
 static WType infer_binary(const Expr *e) {
@@ -141,7 +128,7 @@ static WType infer_binary(const Expr *e) {
         default: break;
     }
     WType l = infer(e->as.binary.l), r = infer(e->as.binary.r);
-    if (op == TK_PLUS && (l == WT_STR || r == WT_STR)) return WT_STR;  /* конкатенация */
+    if (op == TK_PLUS && (l == WT_STR || r == WT_STR)) return WT_STR;
     if (l == WT_FRAC || r == WT_FRAC) return WT_FRAC;
     return WT_INT;
 }
@@ -193,7 +180,7 @@ static WType infer(const Expr *e) {
                     if (!strcmp(m, "get") || !strcmp(m, "post")) return WT_STR;
                     return WT_UNKNOWN;
                 }
-                if (infer(o2) == WT_JSON) {                 /* аксессоры json-значения */
+                if (infer(o2) == WT_JSON) {
                     const char *m = c->as.dot.field;
                     if (!strcmp(m, "get") || !strcmp(m, "at")) return WT_JSON;
                     if (!strcmp(m, "str") || !strcmp(m, "type")) return WT_STR;
@@ -202,7 +189,7 @@ static WType infer(const Expr *e) {
                     if (!strcmp(m, "bool") || !strcmp(m, "has")) return WT_BOOL;
                     return WT_UNKNOWN;
                 }
-                {                                          /* касты-методы на скалярах: x.int()/.str()/.frac()/.bool() */
+                {
                     WType st = infer(o2);
                     if (st == WT_INT || st == WT_FRAC || st == WT_STR || st == WT_BOOL) {
                         const char *m = c->as.dot.field;
@@ -230,9 +217,7 @@ static WType infer(const Expr *e) {
     }
 }
 
-/* ---------- эмиссия выражений ---------- */
 static void emit_expr(FILE *o, const Expr *e);
-
 
 /* экранирование тела C-строки (без обрамляющих кавычек); dbl_pct — удваивать '%' */
 static void emit_c_chars(FILE *o, const char *s, int dbl_pct) {
@@ -252,7 +237,6 @@ static void emit_c_string(FILE *o, const char *s) {
     fputc('"', o); emit_c_chars(o, s, 0); fputc('"', o);
 }
 
-/* спецификатор printf по типу плейсхолдера интерполяции */
 static const char *interp_spec(WType t) {
     switch (t) {
         case WT_INT: case WT_BOOL: return "%d";
@@ -320,7 +304,7 @@ static void emit_expr(FILE *o, const Expr *e) {
             for (int i = 0; i < n; i++) {
                 fputs(", ", o);
                 WType pt = infer(e->as.interp.exprs[i]);
-                if (pt == WT_INT || pt == WT_BOOL) {     /* в variadic int идёт как int */
+                if (pt == WT_INT || pt == WT_BOOL) {
                     fputs("(int)(", o); emit_expr(o, e->as.interp.exprs[i]); fputc(')', o);
                 } else {
                     emit_expr(o, e->as.interp.exprs[i]);
@@ -342,13 +326,13 @@ static void emit_expr(FILE *o, const Expr *e) {
             break;
         case EX_BINARY: {
             TokenKind op = e->as.binary.op;
-            if (op == TK_PLUS && infer(e) == WT_STR) {       /* конкатенация строк */
+            if (op == TK_PLUS && infer(e) == WT_STR) {
                 fputs("wstr_cat(", o);
                 emit_expr(o, e->as.binary.l); fputs(", ", o);
                 emit_expr(o, e->as.binary.r); fputc(')', o);
                 break;
             }
-            if ((op == TK_EQ || op == TK_NEQ)                /* сравнение строк */
+            if ((op == TK_EQ || op == TK_NEQ)
                 && infer(e->as.binary.l) == WT_STR && infer(e->as.binary.r) == WT_STR) {
                 fputs("(strcmp(", o);
                 emit_expr(o, e->as.binary.l); fputs(", ", o);
@@ -365,7 +349,6 @@ static void emit_expr(FILE *o, const Expr *e) {
         }
         case EX_CALL: {
             const Expr *c = e->as.call.callee;
-            /* методы коллекций: nums.add(v)/.pop()/.len(), cfg.has(k)/.len() */
             if (c->kind == EX_DOT) {
                 const Expr *obj = c->as.dot.obj;
                 const char *m = c->as.dot.field;
@@ -373,7 +356,6 @@ static void emit_expr(FILE *o, const Expr *e) {
                     (!strcmp(obj->as.ident, "file") || !strcmp(obj->as.ident, "json") ||
                      !strcmp(obj->as.ident, "http")))
                     cg_fail("--gc-strings does not support the %s module yet", obj->as.ident);
-                /* встроенный модуль time */
             if (obj->kind == EX_IDENT && !strcmp(obj->as.ident, "time")) {
                 if (!strcmp(m, "now"))   { fputs("_wtime_now()", o); break; }
                 if (!strcmp(m, "clock")) { fputs("_wtime_clock()", o); break; }
@@ -420,7 +402,7 @@ static void emit_expr(FILE *o, const Expr *e) {
                 }
                 cg_fail("module http: bad call .%s (use http.get(url) / http.post(url,body); http.serve is a block)", m);
             }
-            if (infer(obj) == WT_JSON) {                  /* аксессоры json-значения */
+            if (infer(obj) == WT_JSON) {
                 if (!strcmp(m, "str"))  { fputs("_wj_str(",  o); emit_expr(o, obj); fputc(')', o); break; }
                 if (!strcmp(m, "int"))  { fputs("_wj_int(",  o); emit_expr(o, obj); fputc(')', o); break; }
                 if (!strcmp(m, "frac")) { fputs("_wj_frac(", o); emit_expr(o, obj); fputc(')', o); break; }
@@ -433,7 +415,7 @@ static void emit_expr(FILE *o, const Expr *e) {
                 if (!strcmp(m, "has")) { fputs("_wj_has(", o); emit_expr(o, obj); fputs(", ", o); emit_expr(o, e->as.call.args[0]); fputc(')', o); break; }
                 cg_fail("json value has no method .%s", m);
             }
-            {                                             /* касты-методы на скалярах: x.int()/.str()/.frac()/.bool() */
+            {
                 WType ot = infer(obj);
                 if (ot == WT_INT || ot == WT_FRAC || ot == WT_STR || ot == WT_BOOL) {
                     if (!strcmp(m, "int")) {
@@ -481,7 +463,6 @@ static void emit_expr(FILE *o, const Expr *e) {
             if (c->kind != EX_IDENT)
                 cg_fail("call supported only by function name or list method");
             const char *fn = c->as.ident;
-            /* len(nums) */
             if (!strcmp(fn, "len") && e->as.call.nargs == 1) {
                 if (infer(e->as.call.args[0]) == WT_STR)
                     fputs("(int)strlen(", o);
@@ -492,7 +473,6 @@ static void emit_expr(FILE *o, const Expr *e) {
                 emit_expr(o, e->as.call.args[0]); fputc(')', o);
                 break;
             }
-            /* касты: str/to_str/int/frac/bool с одним аргументом */
             if (e->as.call.nargs == 1 &&
                 (!strcmp(fn, "str") || !strcmp(fn, "to_str") ||
                  !strcmp(fn, "int") || !strcmp(fn, "frac") || !strcmp(fn, "bool"))) {
@@ -510,7 +490,7 @@ static void emit_expr(FILE *o, const Expr *e) {
                     else { fputs("(int)(", o); emit_expr(o, arg); fputc(')', o); }
                 } else if (!strcmp(fn, "bool")) {
                     fputs("((", o); emit_expr(o, arg); fputs(")!=0)", o);
-                } else { /* frac */
+                } else {
                     if (at == WT_STR) { fputs("wstr_to_frac(", o); emit_expr(o, arg); fputc(')', o); }
                     else { fputs("(double)(", o); emit_expr(o, arg); fputc(')', o); }
                 }
@@ -571,7 +551,6 @@ static void emit_expr(FILE *o, const Expr *e) {
     }
 }
 
-/* ---------- эмиссия инструкций ---------- */
 static void emit_block(FILE *o, const Block *b, int ind);
 static void indent(FILE *o, int n) { for (int i = 0; i < n; i++) fputs("    ", o); }
 
@@ -592,7 +571,6 @@ static void emit_gc_checkpoint(FILE *o, int ind) {
     fputs("wind_str_collect();\n", o);
 }
 
-/* печать значения по типу (terminal.paste) */
 static void emit_print(FILE *o, const Expr *val, int ind) {
     WType t = infer(val);
     const char *fmt;
@@ -610,7 +588,6 @@ static void emit_print(FILE *o, const Expr *val, int ind) {
     fputs(");\n", o);
 }
 
-/* объявление локальной переменной (в теле функции/main) */
 static void emit_local_decl(FILE *o, const Stmt *s, int ind) {
     const DeclType *dt = &s->as.decl.dtype;
     if (g_gc_strings && (dt->kind != DT_SCALAR && dt->kind != DT_INFER))
@@ -619,7 +596,7 @@ static void emit_local_decl(FILE *o, const Stmt *s, int ind) {
         cg_fail("--gc-strings: global declarations must be at the top level");
     if (dt->kind == DT_ARRAY) {
         if (local_declared(s->as.decl.name))
-            cg_fail("array '%s' is already declared", s->as.decl.name);                       /* int.nums[5] → int nums[5] = {0}; */
+            cg_fail("array '%s' is already declared", s->as.decl.name);
         WType el = wt_base(dt->base);
         if (el == WT_VOID || el == WT_UNKNOWN) cg_fail("unknown array type '%s'", s->as.decl.name);
         VType vt; vt.ck = CK_ARRAY; vt.elem = el; vt.key = WT_UNKNOWN;
@@ -632,7 +609,7 @@ static void emit_local_decl(FILE *o, const Stmt *s, int ind) {
     }
     if (dt->kind == DT_LIST) {
         if (local_declared(s->as.decl.name))
-            cg_fail("list '%s' is already declared", s->as.decl.name);                        /* int.list.nums → _wl *nums = _wl_new(...) */
+            cg_fail("list '%s' is already declared", s->as.decl.name);
         WType el = wt_base(dt->base);
         if (el == WT_VOID || el == WT_UNKNOWN) cg_fail("unknown list type '%s'", s->as.decl.name);
         VType vt; vt.ck = CK_LIST; vt.elem = el; vt.key = WT_UNKNOWN;
@@ -654,7 +631,7 @@ static void emit_local_decl(FILE *o, const Stmt *s, int ind) {
     }
     if (dt->kind == DT_DICT) {
         if (local_declared(s->as.decl.name))
-            cg_fail("dict '%s' is already declared", s->as.decl.name);                        /* dict[str,int].cfg → _wd *cfg = _wd_new(ks) */
+            cg_fail("dict '%s' is already declared", s->as.decl.name);
         WType kt = wt_base(dt->key), vt = wt_base(dt->val);
         if (kt == WT_VOID || kt == WT_UNKNOWN || vt == WT_VOID || vt == WT_UNKNOWN)
             cg_fail("unknown dict type '%s'", s->as.decl.name);
@@ -682,9 +659,7 @@ static void emit_local_decl(FILE *o, const Stmt *s, int ind) {
     else if (dt->kind == DT_SCALAR)  t = wt_base(dt->base);
     else cg_fail("unknown declaration kind");
     if (t == WT_VOID || t == WT_UNKNOWN) cg_fail("cannot infer type of variable '%s'", s->as.decl.name);
-    /* Имя уже занято в этой области: 'int.i = int.i + 1' — это присваивание,
-       а не второе объявление. Иначе в C появлялась новая переменная, которая
-       перекрывала внешнюю, и цикл while крутился вечно. */
+    /* Повторное объявление того же типа — присваивание. */
     if (local_declared(s->as.decl.name)) {
         VType prev = var_vtype(s->as.decl.name);
         if (prev.ck != CK_SCALAR || prev.elem != t)
@@ -739,7 +714,7 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
             break;
         case ST_ASSIGN: {
             const Expr *tgt = s->as.assign.target;
-            if (tgt->kind == EX_INDEX) {              /* запись элемента списка через рантайм */
+            if (tgt->kind == EX_INDEX) {
                 if (g_gc_strings) cg_fail("--gc-strings does not support indexing yet");
                 VType cv = coll_vtype(tgt->as.index.coll);
                 if (cv.ck == CK_LIST) {
@@ -889,7 +864,7 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
                 sym_add(g_loc, &g_nloc, s->as.loopl.var, vt_scalar(cv.elem));
                 emit_block(o, &s->as.loopl.body, ind + 1);
                 indent(o, ind); fputs("}\n", o);
-            } else if (cv.ck == CK_DICT) {           /* итерируем по ключам */
+            } else if (cv.ck == CK_DICT) {
                 indent(o, ind);
                 fprintf(o, "for (int __b%d = 0; __b%d < (", id, id);
                 emit_expr(o, s->as.loopl.coll);
@@ -960,7 +935,6 @@ static void emit_block(FILE *o, const Block *b, int ind) {
     if (g_gc_strings) g_nloc = before_block;
 }
 
-/* ---------- функция ---------- */
 static void emit_func_signature(FILE *o, const Stmt *s) {
     WType ret = wt_base(s->as.func.ret);
     fprintf(o, "%s %s(", ctype(ret), s->as.func.name);
@@ -975,7 +949,7 @@ static void emit_func_signature(FILE *o, const Stmt *s) {
 static void emit_func(FILE *o, const Stmt *s) {
     emit_func_signature(o, s);
     fputs(" {\n", o);
-    g_nloc = 0;  /* свежая область видимости */
+    g_nloc = 0;
     for (int i = 0; i < s->as.func.nparams; i++) {
         const Param *p = &s->as.func.params[i];
         WType t = wt_base(p->type);
@@ -986,7 +960,6 @@ static void emit_func(FILE *o, const Stmt *s) {
     fputs("}\n\n", o);
 }
 
-/* ---------- точка входа ---------- */
 int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_strings) {
     cg_err = errbuf; cg_errcap = errcap;
     g_nglob = g_nloc = g_nfunc = g_rep_id = 0;
@@ -1025,9 +998,6 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_s
     /* преамбула */
     fputs("/* Generated by Wind AST codegen */\n", out);
     fputs("#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdarg.h>\n#include <stdint.h>\n#include <time.h>\n#include <math.h>\n\n", out);
-    /* `link "x"` даёт ТОЛЬКО флаг -lx компоновщику. Заголовок не подставляем:
-       имя библиотеки и имя заголовка совпадают далеко не всегда (-lm/math.h,
-       -lz/zlib.h, -lpthread/pthread.h). Нужный #include пишет программист. */
 
     if (g_gc_strings) {
         fputs("#include \"strings_gc.h\"\n\n", out);
@@ -1040,8 +1010,6 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_s
           "#define realloc(p,n) GC_REALLOC((p),(n))\n"
           "#define free(p)      ((void)(p))\n\n", out);
 
-    /* Исключения: стек setjmp-буферов. throw кладёт текст в _wt_msg и
-       прыгает в ближайший try; без try — печатает и выходит. */
     fputs("#include <setjmp.h>\n"
           "static jmp_buf _wt_jb[32]; static int _wt_depth = 0;\n"
           "static const char *_wt_msg = \"\";\n"
@@ -1106,7 +1074,6 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_s
     
     }
 
-    /* рантайм модуля time */
     fputs("__attribute__((unused)) static long _wtime_now(void){ return (long)time(NULL); }\n"
           "__attribute__((unused)) static double _wtime_clock(void){\n"
           "    struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);\n"
@@ -1127,8 +1094,7 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_s
           "__attribute__((unused)) static int _wf_exists(const char *path){\n"
           "    FILE *f=fopen(path,\"r\"); if(f){ fclose(f); return 1;} return 0; }\n\n", out);
 
-    /* рантайм модуля json: tagged union + рекурсивный парсер + аксессоры + encode.
-     * Память под GC, поэтому free не нужен. \\u-эскейпы парсятся как литералы (MVP). */
+    /* JSON: \\u-эскейпы пока не декодируются. */
     fputs(
       "typedef enum { WJ_NUL,WJ_BOO,WJ_INT,WJ_FRC,WJ_STR,WJ_ARR,WJ_OBJ } _wjt;\n"
       "typedef struct _wj { _wjt t; long i; double f; char *s; struct _wj **el; char **ky; int n; } _wj;\n"
@@ -1264,7 +1230,6 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_s
 
     }
 
-    /* forward-декларации функций (рекурсия/взаимные вызовы) */
     for (int i = 0; i < p->body.n; i++)
         if (p->body.items[i]->kind == ST_FUNC) {
             emit_func_signature(out, p->body.items[i]); fputs(";\n", out);
@@ -1288,7 +1253,6 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_s
     }
     fputs("\n", out);
 
-    /* определения функций */
     for (int i = 0; i < p->body.n; i++)
         if (p->body.items[i]->kind == ST_FUNC) emit_func(out, p->body.items[i]);
 
@@ -1313,7 +1277,7 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_s
     for (int i = 0; i < p->body.n; i++) {
         Stmt *s = p->body.items[i];
         if (s->kind == ST_FUNC) continue;
-        if (s->kind == ST_VAR_DECL && s->as.decl.is_global) continue;  /* уже выше */
+        if (s->kind == ST_VAR_DECL && s->as.decl.is_global) continue;
         emit_stmt_at_checkpoint(out, s, 1);
     }
     if (g_gc_strings) fputs("    wind_str_destroy();\n", out);

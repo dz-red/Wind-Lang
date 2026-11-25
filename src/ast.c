@@ -4,8 +4,6 @@
 
 #include "ast.h"
 
-/* ======================= КОНСТРУКТОРЫ ======================= */
-
 static Expr *new_expr(ExprKind kind, int line, int col) {
     Expr *e = (Expr *)calloc(1, sizeof(Expr));
     if (!e) { perror("malloc"); exit(1); }
@@ -74,8 +72,6 @@ Stmt *ast_stmt(StmtKind kind, int line, int col) {
     return s;
 }
 
-/* ======================= РАСТУЩИЕ МАССИВЫ ======================= */
-
 void block_push(Block *b, Stmt *s) {
     b->items = (Stmt **)realloc(b->items, (size_t)(b->n + 1) * sizeof(Stmt *));
     if (!b->items) { perror("realloc"); exit(1); }
@@ -90,8 +86,6 @@ void exprvec_push(Expr ***arr, int *n, int *cap, Expr *e) {
     }
     (*arr)[(*n)++] = e;
 }
-
-/* ======================= ОСВОБОЖДЕНИЕ ======================= */
 
 void ast_free_expr(Expr *e) {
     if (!e) return;
@@ -198,8 +192,6 @@ void ast_free_program(Program *p) {
     if (!p) return;
     ast_free_block(&p->body);
 }
-
-/* ======================= ОТЛАДОЧНЫЙ ДАМП ======================= */
 
 static void indent(FILE *o, int d) { for (int i = 0; i < d; i++) fputs("  ", o); }
 

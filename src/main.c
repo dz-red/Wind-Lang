@@ -151,11 +151,10 @@ int main(int argc, char *argv[]) {
     snprintf(gcc_cmd, sizeof(gcc_cmd), "gcc -O2 -o app output_ast.c -lgc -lm");
 #endif
 
-    /* append a -l flag for each `link "lib"` directive */
     for (int i = 0; i < prog.nlinks; i++) {
         char *lib = prog.links[i];
         strncat(gcc_cmd, " -l", sizeof(gcc_cmd) - strlen(gcc_cmd) - 1);
-        if (lib[0] == '"') {                 /* strip the surrounding quotes */
+        if (lib[0] == '"') {
             size_t len = strlen(lib);
             if (len >= 2) strncat(gcc_cmd, lib + 1, len - 2);
         } else {

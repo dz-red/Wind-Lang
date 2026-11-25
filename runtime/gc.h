@@ -21,14 +21,11 @@ typedef void (*WindGcTrace)(const void *data, WindGcVisit visit, void *context);
    Инициализируй поля-ссылки до сборки. В trace не меняй кучу и не запускай GC. */
 void *wind_gc_alloc_traced(WindGc *gc, size_t size, WindGcTrace trace);
 
-/* Возвращает число освобождённых блоков. roots может быть NULL при count == 0.
-   Корни и ссылки должны указывать на начало блока; NULL и чужие блоки игнорируются. */
+/* Корни — адреса начала блока. Возвращает число освобождённых блоков. */
 size_t wind_gc_collect(WindGc *gc, const void *const *roots, size_t count);
 
-/* Тот же сборщик, но корни перечисляет callback вместо массива. */
 size_t wind_gc_collect_with(WindGc *gc, const void *data, WindGcTrace trace_roots);
 
-/* Освобождает все блоки и оставляет кучу пустой. */
 void wind_gc_destroy(WindGc *gc);
 
 #endif

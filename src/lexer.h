@@ -5,25 +5,22 @@ typedef enum {
     TK_EOF = 0,
     TK_NEWLINE,
 
-    /* Литералы */
-    TK_INT_LIT,        /* 42, -17                  → ival                 */
-    TK_FRAC_LIT,       /* 3,14 (запятая в Wind!)   → fval                 */
-    TK_STR_LIT,        /* "hello"                  → text (без кавычек)   */
-    TK_IDENT,          /* counter, my_var, foo123  → text                 */
+    TK_INT_LIT,
+    TK_FRAC_LIT,
+    TK_STR_LIT,
+    TK_IDENT,
 
-    /* Type keywords (одновременно type-имена) */
-    TK_KW_INT,         /* int   */
-    TK_KW_FRAC,        /* frac  */
-    TK_KW_STR,         /* str   */
-    TK_KW_LIST,        /* list  */
-    TK_KW_ARRAY,       /* array */
-    TK_KW_DICT,        /* dict  */
-    TK_KW_VOID,        /* void  */
-    TK_KW_BOOL,        /* bool  */
-    TK_KW_TRUE,        /* true  → 1 */
-    TK_KW_FALSE,       /* false → 0 */
+    TK_KW_INT,
+    TK_KW_FRAC,
+    TK_KW_STR,
+    TK_KW_LIST,
+    TK_KW_ARRAY,
+    TK_KW_DICT,
+    TK_KW_VOID,
+    TK_KW_BOOL,
+    TK_KW_TRUE,
+    TK_KW_FALSE,
 
-    /* Control flow keywords */
     TK_KW_IF,
     TK_KW_ELSE,
     TK_KW_END,
@@ -39,79 +36,66 @@ typedef enum {
     TK_KW_THROW,
     TK_KW_RETURN,
 
-    /* Декларации */
-    TK_KW_FUNC,        /* func, fn */
+    TK_KW_FUNC,
     TK_KW_GLOBAL,
-    TK_KW_VAR,         /* var — объявление с выводом типа */
+    TK_KW_VAR,
     TK_KW_CLASS,
-    TK_KW_ON,           /* для http.serve */
-    TK_KW_LINK,          /* для подключения Сишных либ */
+    TK_KW_ON,
+    TK_KW_LINK,
     TK_KW_USE, 
     TK_KW_TAKE,
     TK_KW_FROM,
-    /* Пунктуация */
-    TK_LPAREN,         /* (  */
-    TK_RPAREN,         /* )  */
-    TK_LBRACKET,       /* [  — группировка/массив/list-литерал/dict-литерал */
-    TK_RBRACKET,       /* ]  */
-    TK_LBRACE,         /* {  — интерполяция в строке (не используется отдельно пока) */
-    TK_RBRACE,         /* }  */
-    TK_COMMA,          /* ,  — НО внутри числа 3,14 это часть TK_FRAC_LIT */
-    TK_DOT,            /* .  */
-    TK_DOTDOT,         /* .. (диапазон for i in 0..N) */
-    TK_COLON,          /* :  */
 
-    /* Присваивания */
-    TK_ASSIGN,         /* =   */
-    TK_PLUS_EQ,        /* +=  */
-    TK_MINUS_EQ,       /* -=  */
-    TK_STAR_EQ,        /* *=  */
-    TK_SLASH_EQ,       /* /=  */
+    TK_LPAREN,
+    TK_RPAREN,
+    TK_LBRACKET,
+    TK_RBRACKET,
+    TK_LBRACE,
+    TK_RBRACE,
+    TK_COMMA,
+    TK_DOT,
+    TK_DOTDOT,
+    TK_COLON,
 
-    /* Арифметика */
-    TK_PLUS,           /* +   */
-    TK_MINUS,          /* -   */
-    TK_STAR,           /* *   */
-    TK_SLASH,          /* /   */
-    TK_MOD,            /* /%  (Wind-стиль остатка) */
+    TK_ASSIGN,
+    TK_PLUS_EQ,
+    TK_MINUS_EQ,
+    TK_STAR_EQ,
+    TK_SLASH_EQ,
 
-    /* Сравнения */
-    TK_EQ,             /* ==  */
-    TK_NEQ,            /* !=  */
-    TK_LT,             /* <   */
-    TK_GT,             /* >   */
-    TK_LE,             /* <=  */
-    TK_GE,             /* >=  */
+    TK_PLUS,
+    TK_MINUS,
+    TK_STAR,
+    TK_SLASH,
+    TK_MOD,
 
-    /* Логические */
-    TK_AND,            /* &&  */
-    TK_OR,             /* ||  */
+    TK_EQ,
+    TK_NEQ,
+    TK_LT,
+    TK_GT,
+    TK_LE,
+    TK_GE,
 
-    /* Прочее */
-    TK_ARROW,          /* ->  */
-
-    /* Маркер ошибки лексинга */
+    TK_AND,
+    TK_OR,
+    TK_ARROW,
     TK_BAD,
 } TokenKind;
 
 typedef struct {
     TokenKind kind;
-    char *text;        /* malloc'нутая копия для TK_IDENT, TK_STR_LIT;
-                          NULL для остальных. Освобождает wind_tokens_free. */
-    long ival;         /* для TK_INT_LIT */
-    double fval;       /* для TK_FRAC_LIT */
+    char *text;
+    long ival;
+    double fval;
     int line;          /* 1-based */
     int col;           /* 1-based, на старте токена */
 } Token;
 
-/* Лексит src в массив токенов. Последний токен всегда TK_EOF.
- * *out_count — общее число токенов включая EOF.
- * Caller освобождает через wind_tokens_free. */
+/* out_count включает TK_EOF. Массив освобождает wind_tokens_free. */
 Token *wind_lex(const char *src, int *out_count);
 
 void wind_tokens_free(Token *tokens, int count);
 
-/* Имя токена для отладки/ошибок. Возвращает указатель на статическую строку. */
 const char *wind_token_kind_name(TokenKind kind);
 
 #endif /* WIND_LEXER_H */
