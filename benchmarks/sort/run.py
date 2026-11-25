@@ -15,13 +15,6 @@ from xml.sax.saxutils import escape
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
-COLORS = {
-    "Wind": "#79e1f2",
-    "C": "#7ba7ff",
-    "Rust": "#ffad86",
-    "JavaScript": "#f5d379",
-    "Python": "#ad9cff",
-}
 
 
 def run(*command, **kwargs):
@@ -101,63 +94,63 @@ def format_ru(value, places=0):
 
 
 def render(result, tmp, out):
-    width, height = 1280, 1080
+    width, height = 1080, 730
+    paper, ink, muted = "#faf9f5", "#242723", "#525952"
+    rule, bar, accent = "#d6d8d0", "#767e77", "#234f9c"
     svg = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">']
 
-    def rect(x, y, w, h, color, radius=0):
-        svg.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="{radius}" fill="{color}"/>')
+    def rect(x, y, w, h, color):
+        svg.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="{color}"/>')
 
-    def text(x, y, label, size, color="#f1f5ff", weight=400, anchor="start"):
+    def text(x, y, label, size, color=ink, weight=400, anchor="start"):
         svg.append(
             f'<text x="{x}" y="{y}" fill="{color}" font-size="{size}" '
-            f'font-weight="{weight}" fill-opacity="1" text-anchor="{anchor}" '
+            f'font-weight="{weight}" text-anchor="{anchor}" '
             f'font-family="DejaVu Sans">{escape(label)}</text>'
         )
 
     def panel(top, title, rows, step):
-        left, span, row_step = 276, 780, 46
-        panel_height = 106 + len(rows) * row_step
-        rect(68, top, 1144, panel_height, "#151e30", 18)
-        text(96, top + 43, title, 23, weight=700)
+        left, span, row_step = 212, 660, 34
+        text(56, top, title, 20, weight=700)
+        text(1024, top, "Время, мс", 15, muted, anchor="end")
         maximum = step * math.ceil(rows[-1][1] * 1.04 / step)
-        start_y = top + 64
+        start_y = top + 18
         axis_y = start_y + len(rows) * row_step
         for i in range(round(maximum / step) + 1):
             tick = i * step
             x = round(left + span * tick / maximum)
-            rect(x, start_y, 1, axis_y - start_y, "#344056")
-            text(x, axis_y + 25, f"{tick:g}".replace(".", ","), 14, "#a5b4cb", anchor="middle")
-        text(1178, axis_y + 25, "мс", 14, "#a5b4cb", anchor="end")
+            rect(x, start_y, 1, axis_y - start_y, rule)
+            text(x, axis_y + 21, f"{tick:g}".replace(".", ","), 13, muted, anchor="middle")
         for i, (name, ms) in enumerate(rows):
             y = start_y + i * row_step
-            color = COLORS[name]
-            rect(96, y + 15, 8, 13, color, 2)
-            text(117, y + 28, name, 19, weight=700)
-            rect(left, y + 13, max(2, round(span * ms / maximum)), 16, color, 2)
-            text(1178, y + 28, format_ru(ms, 2), 19, color, 700, "end")
+            highlight = name == "Wind"
+            color = accent if highlight else ink
+            weight = 700 if highlight else 400
+            text(56, y + 23, name, 18, color, weight)
+            rect(left, y + 10, round(span * ms / maximum, 2), 14, accent if highlight else bar)
+            text(1024, y + 23, format_ru(ms, 2), 18, color, weight, "end")
 
-    rect(0, 0, width, height, "#0d1422")
-    rect(68, 55, 46, 4, COLORS["Wind"], 2)
-    text(129, 63, "WIND LAB  /  01", 18, COLORS["Wind"], 700)
-    text(68, 128, "Пять языков, одна сортировка", 50, weight=700)
-    text(70, 176, "Сортировка вставками · 8 192 целых числа · меньше — быстрее", 23, "#a5b4cb")
+    rect(0, 0, width, height, paper)
+    text(56, 79, "Сортировка вставками", 42, weight=700)
+    text(56, 112, "8 192 целых числа, пять реализаций. Меньше — быстрее.", 20, muted)
+    rect(56, 134, 968, 1, rule)
     rows = sorted(result["median_ms"].items(), key=lambda row: row[1])
     fast_rows = [row for row in rows if row[0] != "Python"]
     step = 10 ** math.floor(math.log10(rows[-1][1])) / 4
-    panel(218, "Все результаты", rows, step)
+    panel(170, "Все пять языков", rows, step)
     step = 10 ** math.floor(math.log10(fast_rows[-1][1]))
     if fast_rows[-1][1] < 2 * step:
         step /= 2
-    panel(574, "Увеличение · без Python", fast_rows, step)
+    panel(434, "Крупнее: четыре результата без Python", fast_rows, step)
 
     cpu = result["cpu"].replace("12th Gen ", "").replace("(R)", "").replace("(TM)", "")
-    text(69, 925, f"{cpu}  /  {result['platform']}", 18, "#b0bdd3", 700)
-    text(69, 960, f"Медиана {result['rounds']} замеров · 2 прогрева перед каждым · только время сортировки", 18, "#a5b4cb")
-    text(69, 994, "Wind и C: GCC -O2 · Rust: opt-level=2 · JavaScript: Node.js · Python: CPython", 17, "#a5b4cb")
+    rect(56, 644, 968, 1, rule)
+    text(56, 671, f"{cpu} / {result['platform']} · Медиана {result['rounds']} замеров, без запуска и прогрева", 15, muted)
+    text(56, 697, "Wind и C: GCC -O2 · Rust: opt-level=2 · JavaScript: Node.js · Python: CPython", 15, muted)
     svg.append("</svg>")
     source = tmp / "chart.svg"
     source.write_text("\n".join(svg), encoding="utf-8")
-    run("magick", "-background", "#0d1422", source, "-strip", f"PNG24:{out}")
+    run("magick", "-background", paper, source, "-strip", f"PNG24:{out}")
 
 
 def main():
