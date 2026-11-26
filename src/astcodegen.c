@@ -257,23 +257,23 @@ static void check_return(const Stmt *s) {
     char message[256], expected_label[48], actual_label[48], note[192];
     snprintf(message, sizeof message, "expected `%s`, found `%s` in function `%.140s`",
              expected, actual, cg_func->as.func.name);
-    snprintf(expected_label, sizeof expected_label, "ожидается `%s`", expected);
-    snprintf(actual_label, sizeof actual_label, "получен `%s`", actual);
-    snprintf(note, sizeof note, "функция `%.120s` возвращает `%s`", cg_func->as.func.name, expected);
-    const char *suggestions = "Верни значение объявленного типа или поменяй тип в сигнатуре,\n"
-                              "  если функция действительно должна возвращать другой тип.";
+    snprintf(expected_label, sizeof expected_label, "expected `%s`", expected);
+    snprintf(actual_label, sizeof actual_label, "found `%s`", actual);
+    snprintf(note, sizeof note, "function `%.120s` declares a return type of `%s`", cg_func->as.func.name, expected);
+    const char *suggestions = "Return a value of the declared type, or change the signature if the function\n"
+                              "  is intended to return a different type.";
     if (want == WT_INT && have == WT_STR) {
-        suggestions = "Если нужен числовой литерал, используй `return 100` вместо `return \"100\"`.\n"
-                      "  Если число приходит строкой, преобразуй её: `return int(text)`.\n"
-                      "  Если функция должна возвращать текст, укажи `-> str` в сигнатуре.";
+        suggestions = "To return an integer literal, use `return 100` instead of `return \"100\"`.\n"
+                      "  To convert a string containing a number, use `return int(text)`.\n"
+                      "  If the function should return text, declare `-> str` instead.";
     } else if (want == WT_VOID) {
-        suggestions = "Если функция не должна ничего возвращать, используй `return` без значения.\n"
-                      "  Иначе объяви нужный тип после `->` в сигнатуре.";
+        suggestions = "Use `return` without a value if the function should not return one.\n"
+                      "  Otherwise, declare the intended return type after `->`.";
     }
     wind_diag_emit(cg_diags, &(WindDiagnostic){
         .code = WD_RETURN, .source = cg_func->source,
         .primary = s->as.ret.range, .secondary = cg_func->as.func.type_range,
-        .message = message, .title = "несовместимый тип возвращаемого значения",
+        .message = message, .title = "return type mismatch",
         .label = actual_label, .secondary_label = expected_label, .note = note,
         .suggestions = suggestions
     });
@@ -363,16 +363,14 @@ static _Noreturn void interpolation_error(const Expr *expr, WType type) {
     char message[256], title[256], note[256], suggestions[384];
     WindDiagnostic diag = {
         .code = WD_INTERPOLATION, .source = cg_source, .primary = cg_interp_range,
-        .message = message, .title = title,
-        .suggestions = "Проверь имена и тип выражения. Например, `str.title = \"Wind\"`\n"
-                       "  можно подставить так: `terminal.paste -> \"=== ${title} ===\"`."
+        .message = message,
+        .suggestions = "Check the names and types in the expression. For example, with `str.title = \"Wind\"`,\n"
+                       "  write `terminal.paste -> \"=== ${title} ===\"`."
     };
     if (type == WT_UNKNOWN) {
         snprintf(message, sizeof message, "cannot determine the type of this interpolation expression");
-        snprintf(title, sizeof title, "не удалось определить тип выражения в строке");
     } else {
         snprintf(message, sizeof message, "cannot interpolate a value of type `%s`", wind_type_name(type));
-        snprintf(title, sizeof title, "в строку нельзя подставить значение типа `%s`", wind_type_name(type));
     }
     if (expr->kind == EX_DOT && expr->as.dot.obj->kind == EX_IDENT) {
         const char *prefix = expr->as.dot.obj->as.ident, *name = expr->as.dot.field;
@@ -380,10 +378,11 @@ static _Noreturn void interpolation_error(const Expr *expr, WType type) {
         const char *expected = wind_type_name(declared);
         if (var_vtype(prefix).elem == WT_UNKNOWN && interp_spec(declared) && one_typo(prefix, expected)) {
             snprintf(message, sizeof message, "unknown type prefix `%.80s` for `%.120s`", prefix, name);
-            snprintf(title, sizeof title, "неизвестный префикс типа `%.80s`", prefix);
-            snprintf(note, sizeof note, "`%.120s` объявлена с типом `%s`", name, expected);
-            snprintf(suggestions, sizeof suggestions, "Напиши `${%s.%.120s}` или просто `${%.120s}`.",
+            snprintf(title, sizeof title, "unknown type prefix `%.80s`", prefix);
+            snprintf(note, sizeof note, "`%.120s` is declared as `%s`", name, expected);
+            snprintf(suggestions, sizeof suggestions, "Use `${%s.%.120s}` or `${%.120s}`.",
                      expected, name, name);
+            diag.title = title;
             diag.note = note;
             diag.suggestions = suggestions;
         }

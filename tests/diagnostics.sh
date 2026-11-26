@@ -24,11 +24,13 @@ reject terminal.wnd
 cp error default
 reject --diag=normal terminal.wnd
 cmp default error
+grep -Fx 'error[W1001]: unknown terminal method `past`' error
 grep -Fx '  --> terminal.wnd:1:12' error
 grep -Fx '  │            ^^^^' error
 if grep -q 'SUGGESTIONS' error; then exit 1; fi
 reject --diag=learn terminal.wnd
 grep -Fx 'EXPLANATION' error
+grep -Fx '  Use `terminal.paste` to display a value:' error
 grep -Fx '    terminal.paste -> "Hello"' error
 grep -Fx '  wind --explain W1001' error
 
@@ -48,13 +50,15 @@ returns.wnd:5:12: error[W2001]: expected `str`, found `int` in function `label`
 EOF
 cmp expected error
 reject --boehm --diag=normal --check returns.wnd
-grep -Fx '  │                 ─── ожидается `int`' error
-grep -Fx '  │            ^^^^^ получен `str`' error
-grep -Fx '  │            ^^^^^^ получен `int`' error
+grep -Fx 'error[W2001]: return type mismatch' error
+grep -Fx '  │                 ─── expected `int`' error
+grep -Fx '  │            ^^^^^ found `str`' error
+grep -Fx '  │            ^^^^^^ found `int`' error
 reject --diag=learn --check returns.wnd
 grep -F 'return int(text)' error
 grep -Fx '  wind --explain W2001' error
 "$wind" --explain W2001 > explain
+grep -Fx '  Example:' explain
 grep -F 'return 100' explain
 
 printf 'use returns\n' > main.wnd
@@ -82,10 +86,11 @@ reject --diag=learn -s interp.wnd
 cmp default error
 reject -s --diag=learn interp.wnd
 cmp default error
-grep -Fx 'error[W2003]: неизвестный префикс типа `st`' error
+grep -Fx 'error[W2003]: unknown type prefix `st`' error
 grep -Fx '  --> interp.wnd:2:26' error
 grep -Fx '  │                          ^^^^^^^^' error
-grep -F '`${str.title}` или просто `${title}`' error
+grep -Fx 'note: `title` is declared as `str`' error
+grep -Fx '  Use `${str.title}` or `${title}`.' error
 grep -Fx '  wind --explain W2003' error
 reject --diag=compact -s interp.wnd
 grep -Fx 'interp.wnd:2:26: error[W2003]: unknown type prefix `st` for `title`' error

@@ -9,16 +9,16 @@ const char *current_file = "<stdin>";
 static const char *explanation(WindDiagCode code) {
     switch (code) {
         case WD_TERMINAL:
-            return "`terminal.paste` выводит значение. После `->` идёт выражение,\n"
-                   "  результат которого появится в терминале.";
+            return "`terminal.paste` displays a value. Write the expression to display\n"
+                   "  after `->`.";
         case WD_RETURN:
-            return "Тип после `->` в сигнатуре определяет, что функция возвращает.\n"
-                   "  Например, `100` имеет тип `int`, а `\"100\"` — тип `str`.\n"
-                   "  `void` означает, что функция не возвращает значение.";
+            return "The type after `->` in the function signature is its return type.\n"
+                   "  For example, `100` is an `int`, while `\"100\"` is a `str`.\n"
+                   "  A function with return type `void` does not return a value.";
         case WD_INTERPOLATION:
-            return "В `${...}` можно подставить `int`, `frac`, `str` или `bool`.\n"
-                   "  Если пишешь тип перед именем, например `str.title`,\n"
-                   "  он должен совпадать с типом переменной. Префикс можно опустить.";
+            return "An expression inside `${...}` must produce an `int`, `frac`, `str`, or `bool`.\n"
+                   "  A type prefix such as `str` in `str.title` is optional.\n"
+                   "  If present, it must match the variable's declared type.";
         default: return NULL;
     }
 }
@@ -33,10 +33,10 @@ int wind_diag_explain(const char *code) {
         snprintf(name, sizeof name, "W%04d", id);
         if (strcmp(name, code) == 0) {
             printf("%s\n  %s\n", name, text);
-            if (id == WD_TERMINAL) puts("\n  Пример: terminal.paste -> \"Hello\"");
-            if (id == WD_RETURN) puts("\n  Пример:\n    func price() -> int\n        return 100\n    end");
+            if (id == WD_TERMINAL) puts("\n  Example: terminal.paste -> \"Hello\"");
+            if (id == WD_RETURN) puts("\n  Example:\n    func price() -> int\n        return 100\n    end");
             if (id == WD_INTERPOLATION)
-                puts("\n  Пример:\n    str.title = \"Wind\"\n    terminal.paste -> \"=== ${title} ===\"");
+                puts("\n  Example:\n    str.title = \"Wind\"\n    terminal.paste -> \"=== ${title} ===\"");
             return 1;
         }
     }

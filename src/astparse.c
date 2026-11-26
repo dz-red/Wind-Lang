@@ -740,13 +740,12 @@ static Stmt *parse_output(P *p, int line, int col) {
     expect(p, TK_DOT, ".");
     Token *field = expect(p, TK_IDENT, "paste");
     if (strcmp(field->text, "paste")) {
-        char message[256], title[256];
+        char message[256];
         snprintf(message, sizeof message, "unknown terminal method `%.160s`", field->text);
-        snprintf(title, sizeof title, "у `terminal` нет команды `%.160s`", field->text);
         wind_diag_emit(p->diags, &(WindDiagnostic){
             .code = WD_TERMINAL, .source = p->source, .primary = token_range(field),
-            .message = message, .title = title,
-            .suggestions = "Для вывода используй `paste`, например:\n    terminal.paste -> \"Hello\""
+            .message = message,
+            .suggestions = "Use `terminal.paste` to display a value:\n    terminal.paste -> \"Hello\""
         });
     }
     expect(p, TK_ARROW, "->");

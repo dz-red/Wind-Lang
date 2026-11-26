@@ -1,3 +1,7 @@
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,6 +44,10 @@ static int build_gc_strings(int nlinks, char *const *links) {
     pid_t child = fork();
     if (child < 0) { perror("fork"); return 0; }
     if (child == 0) {
+        if (setenv("LC_ALL", "C", 1) != 0) {
+            fputs("[wind] cannot set the locale for GCC\n", stderr);
+            _exit(127);
+        }
         execvp(args[0], args);
         perror("gcc");
         _exit(127);
@@ -190,9 +198,9 @@ int main(int argc, char *argv[]) {
     char gcc_cmd[1024];
 #ifdef _WIN32
     /* -static + GC_NOT_DLL => самодостаточный .exe без libgc-1.dll/mingw-dll рядом */
-    snprintf(gcc_cmd, sizeof(gcc_cmd), "gcc -O2 -DGC_NOT_DLL -o app output_ast.c -static -lgc -lm -lws2_32");
+    snprintf(gcc_cmd, sizeof(gcc_cmd), "set \"LC_ALL=C\" && gcc -O2 -DGC_NOT_DLL -o app output_ast.c -static -lgc -lm -lws2_32");
 #else
-    snprintf(gcc_cmd, sizeof(gcc_cmd), "gcc -O2 -o app output_ast.c -lgc -lm");
+    snprintf(gcc_cmd, sizeof(gcc_cmd), "LC_ALL=C gcc -O2 -o app output_ast.c -lgc -lm");
 #endif
 
     for (int i = 0; i < prog.nlinks; i++) {
