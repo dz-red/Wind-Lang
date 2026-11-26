@@ -57,6 +57,10 @@ static const char *explanation(WindDiagCode code) {
         case WD_TERMINAL:
             return "`terminal.paste` displays a value. Write the expression to display\n"
                    "  after `->`.";
+        case WD_PARSE:
+            return "The source does not match Wind syntax at the reported location.\n"
+                   "  The highlighted position is where parsing stopped. A required token\n"
+                   "  may be missing immediately before it.";
         case WD_RETURN:
             return "The type after `->` in the function signature is its return type.\n"
                    "  For example, `100` is an `int`, while `\"100\"` is a `str`.\n"
@@ -70,7 +74,7 @@ static const char *explanation(WindDiagCode code) {
 }
 
 int wind_diag_explain(const char *code) {
-    const WindDiagCode codes[] = {WD_TERMINAL, WD_RETURN, WD_INTERPOLATION};
+    const WindDiagCode codes[] = {WD_TERMINAL, WD_PARSE, WD_RETURN, WD_INTERPOLATION};
     for (size_t i = 0; i < sizeof codes / sizeof *codes; i++) {
         WindDiagCode id = codes[i];
         const char *text = explanation(id);
@@ -80,6 +84,9 @@ int wind_diag_explain(const char *code) {
         if (strcmp(name, code) == 0) {
             printf("%s\n  %s\n", name, text);
             if (id == WD_TERMINAL) puts("\n  Example: terminal.paste -> \"Hello\"");
+            if (id == WD_PARSE)
+                puts("\n  Example: `terminal.paste value` is missing `->`.\n"
+                     "  Write `terminal.paste -> value`.");
             if (id == WD_RETURN) puts("\n  Example:\n    func price() -> int\n        return 100\n    end");
             if (id == WD_INTERPOLATION)
                 puts("\n  Example:\n    str.title = \"Wind\"\n    terminal.paste -> \"=== ${title} ===\"");
@@ -268,7 +275,7 @@ void wind_diag_emit(WindDiagnostics *diags, const WindDiagnostic *d) {
         excerpt(d->source, d->primary, d->label, gutter, 1, style);
     }
     if (d->note) fprintf(stderr, "%snote:%s %s\n", style->yellow, style->reset, d->note);
-    const char *text = explanation(d->code);
+    const char *text = d->explanation ? d->explanation : explanation(d->code);
     if (diags->mode == DIAG_LEARN && text) {
         fprintf(stderr, "\n%sEXPLANATION%s\n  %s\n", style->cyan, style->reset, text);
         if (d->suggestions)

@@ -39,7 +39,7 @@ typedef struct {
     const WindSource *source;
     WindRange primary, secondary;
     const char *message, *title, *label, *secondary_label;
-    const char *note, *suggestions;
+    const char *note, *explanation, *suggestions;
 } WindDiagnostic;
 
 WindSource *wind_source_open(WindDiagnostics *diags, const char *path);

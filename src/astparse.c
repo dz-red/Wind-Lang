@@ -45,14 +45,21 @@ static WindRange token_range(const Token *t) {
     return (WindRange){t->line, t->col, t->end_line, t->end_col};
 }
 
-static _Noreturn void parse_error(P *p, const Token *t, const char *message) {
+static _Noreturn void parse_error_detail(P *p, const Token *t, const char *message,
+                                        const char *explanation, const char *suggestions) {
     if (t->problem) message = t->problem;
     if (p->nested_error) snprintf(p->nested_error, 256, "%s", message);
     else wind_diag_emit(p->diags, &(WindDiagnostic){
         .code = t->problem ? WD_LEX : WD_PARSE, .source = p->source,
-        .primary = token_range(t), .message = message
+        .primary = token_range(t), .message = message,
+        .explanation = t->problem ? NULL : explanation,
+        .suggestions = t->problem ? NULL : suggestions
     });
     longjmp(p->jb, 1);
+}
+
+static _Noreturn void parse_error(P *p, const Token *t, const char *message) {
+    parse_error_detail(p, t, message, NULL, NULL);
 }
 
 static _Noreturn void perr(P *p, const char *fmt, ...) {
@@ -748,7 +755,26 @@ static Stmt *parse_output(P *p, int line, int col) {
             .suggestions = "Use `terminal.paste` to display a value:\n    terminal.paste -> \"Hello\""
         });
     }
-    expect(p, TK_ARROW, "->");
+    if (!accept(p, TK_ARROW)) {
+        Token at = *tok(p);
+        if (at.problem) parse_error(p, &at, at.problem);
+        if (at.kind == TK_NEWLINE || at.kind == TK_EOF) {
+            at.line = field->end_line;
+            at.col = field->end_col;
+        }
+        at.end_line = at.line;
+        at.end_col = at.col;
+        char example[256];
+        const char *suggestion = "Write `terminal.paste -> expression`, for example:\n"
+                                 "    terminal.paste -> \"Hello\"";
+        if (at.kind == TK_IDENT && (peekk(p, 1) == TK_NEWLINE || peekk(p, 1) == TK_EOF)) {
+            snprintf(example, sizeof example, "Use `terminal.paste -> %.160s`.", at.text);
+            suggestion = example;
+        }
+        parse_error_detail(p, &at, "expected `->` after `terminal.paste`",
+                           "`terminal.paste` requires `->` before the expression to display.",
+                           suggestion);
+    }
     Expr *val = parse_expr(p);
     expect_eol(p);
     Stmt *s = ast_stmt(ST_OUTPUT, line, col);

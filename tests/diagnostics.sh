@@ -35,6 +35,25 @@ grep -Fx '  Use `terminal.paste` to display a value:' error
 grep -Fx '    terminal.paste -> "Hello"' error
 grep -Fx '  wind --explain W1001' error
 
+printf '    terminal.paste line\n' > arrow.wnd
+reject --diag=learn -s arrow.wnd
+grep -Fx 'error[W1002]: expected `->` after `terminal.paste`' error
+grep -Fx '  --> arrow.wnd:1:20' error
+grep -Fx '  `terminal.paste` requires `->` before the expression to display.' error
+grep -Fx '  Use `terminal.paste -> line`.' error
+grep -Fx '  wind --explain W1002' error
+reject --diag=compact arrow.wnd
+grep -Fx 'arrow.wnd:1:20: error[W1002]: expected `->` after `terminal.paste`' error
+if grep -q 'EXPLANATION' error; then exit 1; fi
+printf 'terminal.paste\nint.x = 1\n' > arrow.wnd
+reject --diag=compact arrow.wnd
+grep -Fx 'arrow.wnd:1:15: error[W1002]: expected `->` after `terminal.paste`' error
+printf ')\n' > syntax.wnd
+reject --diag=learn syntax.wnd
+grep -Fx '  The source does not match Wind syntax at the reported location.' error
+"$wind" --explain W1002 > explain
+grep -Fx '  Write `terminal.paste -> value`.' explain
+
 cat > returns.wnd <<'EOF'
 func price() -> int
     return "100"
