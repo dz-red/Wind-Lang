@@ -39,17 +39,22 @@ terminal.paste -> "${time.clock() - start} ${total}"
 }
 
 
-def measure(launcher, app, expected):
+def measure(launcher, app, expected, profile=False):
     env = os.environ.copy()
     env.pop("WGC_STRESS", None)
-    output = subprocess.check_output([launcher, app], text=True, env=env, timeout=30)
-    seconds, check, rss = output.split()
+    proc = subprocess.run([launcher, app], text=True, env=env, timeout=30, check=True,
+                          capture_output=True)
+    seconds, check, rss = proc.stdout.split()
     if int(check) != expected:
-        raise RuntimeError(f"{app}: {output}")
+        raise RuntimeError(f"{app}: {proc.stdout}")
+    if profile:
+        prefix = "WGC_PROFILE "
+        return json.loads(next(line[len(prefix):] for line in proc.stderr.splitlines()
+                               if line.startswith(prefix)))
     return {"ms": float(seconds) * 1000, "rss_kib": int(rss)}
 
 
-def benchmark(wind, rounds, work):
+def benchmark(wind, rounds, work, baseline=None, profile=False):
     result = {"host": platform.platform(), "rounds": rounds, "workloads": {}}
     launcher = work / "rss"
     source = Path(__file__).with_name("rss.c")
@@ -58,12 +63,24 @@ def benchmark(wind, rounds, work):
     for name, (source, expected) in WORKLOADS.items():
         path = work / "benchmark.wnd"
         path.write_text(source)
-        modes = {"WGC": ["--wgc"], "Boehm": ["--boehm"]}
+        modes = {"WGC": [wind, "--wgc"], "Boehm": [wind, "--boehm"]}
+        if baseline:
+            modes["WGC baseline"] = [baseline, "--wgc"]
         apps = {}
-        for mode, flags in modes.items():
-            subprocess.run([wind, *flags, path], cwd=work, check=True, timeout=30)
+        profiled = None
+        for mode, command in modes.items():
+            subprocess.run([*command, path], cwd=work, check=True, timeout=30)
             apps[mode] = work / mode
             (work / "app").replace(apps[mode])
+            if profile and mode == "WGC":
+                runtime = Path(__file__).resolve().parents[2] / "runtime"
+                profiled = work / "WGC-profile"
+                subprocess.run(
+                    ["gcc", "-O2", "-DWIND_GC_PROFILE", "-I", runtime, work / "output_ast.c",
+                     runtime / "gc.c", runtime / "strings_gc.c", runtime / "collections_gc.c",
+                     "-lm", "-o", profiled],
+                    check=True, timeout=30,
+                )
 
         order = list(apps)
         samples = {mode: [] for mode in order}
@@ -81,18 +98,26 @@ def benchmark(wind, rounds, work):
             }
             for mode, runs in samples.items()
         }
+        if profiled:
+            profiles = [measure(launcher, profiled, expected, profile=True) for _ in range(rounds)]
+            result["workloads"][name]["WGC profile"] = {
+                key: statistics.median(p[key] for p in profiles) for key in profiles[0]
+            }
     return result
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--wind", type=Path, default=Path("./wind"))
+    parser.add_argument("--baseline", type=Path)
+    parser.add_argument("--profile", action="store_true")
     parser.add_argument("--rounds", type=int, default=9)
     args = parser.parse_args()
     if args.rounds < 1:
         parser.error("--rounds must be positive")
     with tempfile.TemporaryDirectory(prefix="wind-gc-benchmark-") as tmp:
-        result = benchmark(args.wind.resolve(), args.rounds, Path(tmp))
+        result = benchmark(args.wind.resolve(), args.rounds, Path(tmp),
+                           args.baseline.resolve() if args.baseline else None, args.profile)
     print(json.dumps(result, indent=2))
 
 

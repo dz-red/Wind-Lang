@@ -4,11 +4,14 @@
 #include <stddef.h>
 
 struct WindGcBlock;
+struct WindGcPage;
 
 /* Начальное состояние: WindGc gc = {0};. Не копируй непустую кучу. */
 typedef struct {
     struct WindGcBlock *head;
     struct WindGcBlock **index;
+    struct WindGcPage *partial_page;
+    struct WindGcPage *empty_page;
     size_t capacity;
     size_t count;
 } WindGc;
