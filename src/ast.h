@@ -31,7 +31,7 @@ struct Expr {
         long   ival;
         double fval;
         char  *sval;
-        struct { char **lits; Expr **exprs; int n; } interp; /* n выражений, n+1 литералов */
+        struct { char **lits; Expr **exprs; WindRange *ranges; int n; } interp; /* n выражений, n+1 литералов */
         char  *ident;
         struct { TokenKind type; char *name; } typed;
         struct { Expr *obj; char *field; } dot;
@@ -127,7 +127,7 @@ typedef struct {
 Expr *ast_int   (long v,   int line, int col);
 Expr *ast_frac  (double v, int line, int col);
 Expr *ast_str   (char *raw,int line, int col);  /* забирает владение raw */
-Expr *ast_interp(char **lits, Expr **exprs, int n, int line, int col); /* забирает владение массивами */
+Expr *ast_interp(char **lits, Expr **exprs, WindRange *ranges, int n, int line, int col);
 Expr *ast_ident (char *nm, int line, int col);  /* забирает владение nm  */
 Expr *ast_typed (TokenKind t, char *nm, int line, int col);
 Expr *ast_dot   (Expr *obj, char *field, int line, int col);

@@ -20,9 +20,10 @@ Expr *ast_frac(double v, int line, int col) {
 Expr *ast_str(char *raw, int line, int col) {
     Expr *e = new_expr(EX_STR, line, col); e->as.sval = raw; return e;
 }
-Expr *ast_interp(char **lits, Expr **exprs, int n, int line, int col) {
+Expr *ast_interp(char **lits, Expr **exprs, WindRange *ranges, int n, int line, int col) {
     Expr *e = new_expr(EX_INTERP, line, col);
     e->as.interp.lits = lits; e->as.interp.exprs = exprs; e->as.interp.n = n;
+    e->as.interp.ranges = ranges;
     return e;
 }
 Expr *ast_ident(char *nm, int line, int col) {
@@ -95,7 +96,7 @@ void ast_free_expr(Expr *e) {
         case EX_INTERP:
             for (int i = 0; i < e->as.interp.n; i++) ast_free_expr(e->as.interp.exprs[i]);
             for (int i = 0; i < e->as.interp.n + 1; i++) free(e->as.interp.lits[i]);
-            free(e->as.interp.exprs); free(e->as.interp.lits); break;
+            free(e->as.interp.exprs); free(e->as.interp.lits); free(e->as.interp.ranges); break;
         case EX_IDENT: free(e->as.ident); break;
         case EX_TYPED: free(e->as.typed.name); break;
         case EX_DOT:

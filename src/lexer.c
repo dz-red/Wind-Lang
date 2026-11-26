@@ -95,6 +95,7 @@ static Token simple_tok(Lexer *l, TokenKind k, int start_line, int start_col) {
     t.end_line = l->line;
     t.end_col = l->col;
     t.problem = NULL;
+    t.string_source = NULL;
     return t;
 }
 
@@ -179,6 +180,7 @@ static Token lex_string(Lexer *l) {
     }
     advance(l);
     Token t = simple_tok(l, TK_STR_LIT, sl, sc);
+    t.string_source = l->src + start;
 
     char *text = (char *)malloc((size_t)len + 1);
     if (!text) { perror("malloc"); exit(1); }

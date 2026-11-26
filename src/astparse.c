@@ -219,6 +219,34 @@ static Expr *parse_interp_placeholder(const char *inner, char *msg) {
     return e;
 }
 
+typedef struct {
+    const char *source, *decoded;
+    int line, col;
+} StringPosition;
+
+static void advance_string_position(StringPosition *p, const char *to) {
+    while (p->decoded < to) {
+        /* Экранированная пара занимает один байт после декодирования. */
+        int bytes = *p->source == '\\' ? 2 : 1;
+        for (int i = 0; i < bytes; i++) {
+            if (*p->source++ == '\n') { p->line++; p->col = 1; }
+            else p->col++;
+        }
+        p->decoded++;
+    }
+}
+
+static WindRange interp_range(StringPosition *p, const char *start, const char *end) {
+    while (start < end && strchr(" \t\r\n", *start)) start++;
+    while (end > start && strchr(" \t\r\n", end[-1])) end--;
+    advance_string_position(p, start);
+    WindRange range = {.line = p->line, .col = p->col};
+    advance_string_position(p, end);
+    range.end_line = p->line;
+    range.end_col = p->col;
+    return range;
+}
+
 /* Только ${…} начинает интерполяцию; одиночные скобки остаются текстом. */
 static Expr *parse_string_literal(P *p, const Token *literal) {
     const char *raw = literal->text;
@@ -228,6 +256,8 @@ static Expr *parse_string_literal(P *p, const Token *literal) {
 
     char **lits = NULL;  int nlit = 0, litcap = 0;
     Expr **exprs = NULL; int nexp = 0, expcap = 0;
+    WindRange *ranges = NULL;
+    StringPosition position = {literal->string_source, raw, line, col + 1};
 
     size_t rlen = strlen(raw);
     char *buf = (char *)malloc(rlen + 1);
@@ -255,13 +285,20 @@ static Expr *parse_string_literal(P *p, const Token *literal) {
                 free(buf);
                 for (int i = 0; i < nlit; i++) free(lits[i]);
                 for (int i = 0; i < nexp; i++) ast_free_expr(exprs[i]);
-                free(lits); free(exprs);
+                free(lits); free(exprs); free(ranges);
                 parse_error(p, literal, message);
             }
             buf[bi] = '\0';
             strvec_push(&lits, &nlit, &litcap, dup_s(buf));
             bi = 0;
+            int oldcap = expcap;
             exprvec_push(&exprs, &nexp, &expcap, ph);
+            if (expcap != oldcap) {
+                WindRange *grown = realloc(ranges, (size_t)expcap * sizeof *ranges);
+                if (!grown) { perror("realloc"); exit(1); }
+                ranges = grown;
+            }
+            ranges[nexp - 1] = interp_range(&position, s + 2, close);
             s = close + 1;
         } else {
             buf[bi++] = *s++;
@@ -271,7 +308,7 @@ static Expr *parse_string_literal(P *p, const Token *literal) {
     strvec_push(&lits, &nlit, &litcap, dup_s(buf));
     free(buf);
 
-    return ast_interp(lits, exprs, nexp, line, col);
+    return ast_interp(lits, exprs, ranges, nexp, line, col);
 }
 
 static Expr *parse_primary(P *p) {

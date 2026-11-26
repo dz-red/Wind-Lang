@@ -19,6 +19,7 @@ static jmp_buf  cg_jb;
 static WindDiagnostics *cg_diags;
 static const Stmt *cg_stmt, *cg_func;
 static const WindSource *cg_source;
+static WindRange cg_interp_range;
 
 static Sym      g_glob[256]; static int g_nglob;
 static Sym      g_loc[256];  static int g_nloc;     /* сбрасывается на каждую функцию/main */
@@ -33,7 +34,8 @@ static void cg_fail(const char *fmt, ...) {
     va_end(ap);
     wind_diag_emit(cg_diags, &(WindDiagnostic){
         .code = WD_CODEGEN, .source = cg_source, .message = message,
-        .primary = cg_stmt ? (WindRange){.line = cg_stmt->line, .col = cg_stmt->col} : (WindRange){0}
+        .primary = cg_interp_range.line ? cg_interp_range :
+                   cg_stmt ? (WindRange){.line = cg_stmt->line, .col = cg_stmt->col} : (WindRange){0}
     });
     longjmp(cg_jb, 1);
 }
@@ -347,6 +349,49 @@ static void emit_var_ref(FILE *o, const Expr *e, int read) {
     else fputs(name, o);
 }
 
+static int one_typo(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    if (!*a && !*b) return 0;
+    if (*a && !strcmp(a + 1, b)) return 1;
+    if (*b && !strcmp(a, b + 1)) return 1;
+    if (!*a || !*b) return 0;
+    return !strcmp(a + 1, b + 1) ||
+           (a[0] == b[1] && a[1] == b[0] && !strcmp(a + 2, b + 2));
+}
+
+static _Noreturn void interpolation_error(const Expr *expr, WType type) {
+    char message[256], title[256], note[256], suggestions[384];
+    WindDiagnostic diag = {
+        .code = WD_INTERPOLATION, .source = cg_source, .primary = cg_interp_range,
+        .message = message, .title = title,
+        .suggestions = "Проверь имена и тип выражения. Например, `str.title = \"Wind\"`\n"
+                       "  можно подставить так: `terminal.paste -> \"=== ${title} ===\"`."
+    };
+    if (type == WT_UNKNOWN) {
+        snprintf(message, sizeof message, "cannot determine the type of this interpolation expression");
+        snprintf(title, sizeof title, "не удалось определить тип выражения в строке");
+    } else {
+        snprintf(message, sizeof message, "cannot interpolate a value of type `%s`", wind_type_name(type));
+        snprintf(title, sizeof title, "в строку нельзя подставить значение типа `%s`", wind_type_name(type));
+    }
+    if (expr->kind == EX_DOT && expr->as.dot.obj->kind == EX_IDENT) {
+        const char *prefix = expr->as.dot.obj->as.ident, *name = expr->as.dot.field;
+        WType declared = var_type(name);
+        const char *expected = wind_type_name(declared);
+        if (var_vtype(prefix).elem == WT_UNKNOWN && interp_spec(declared) && one_typo(prefix, expected)) {
+            snprintf(message, sizeof message, "unknown type prefix `%.80s` for `%.120s`", prefix, name);
+            snprintf(title, sizeof title, "неизвестный префикс типа `%.80s`", prefix);
+            snprintf(note, sizeof note, "`%.120s` объявлена с типом `%s`", name, expected);
+            snprintf(suggestions, sizeof suggestions, "Напиши `${%s.%.120s}` или просто `${%.120s}`.",
+                     expected, name, name);
+            diag.note = note;
+            diag.suggestions = suggestions;
+        }
+    }
+    wind_diag_emit(cg_diags, &diag);
+    longjmp(cg_jb, 1);
+}
+
 static void emit_expr(FILE *o, const Expr *e) {
     switch (e->kind) {
         case EX_INT:   fprintf(o, "%ld", e->as.ival); break;
@@ -354,16 +399,21 @@ static void emit_expr(FILE *o, const Expr *e) {
         case EX_STR:   emit_c_string(o, e->as.sval); break;
         case EX_INTERP: {
             int n = e->as.interp.n;
+            WindRange outer = cg_interp_range;
             fputs("wstr_build(\"", o);
             for (int i = 0; i < n; i++) {
                 emit_c_chars(o, e->as.interp.lits[i], 1);
-                const char *spec = interp_spec(infer(e->as.interp.exprs[i]));
-                if (!spec) cg_fail("interpolation: cannot determine type of placeholder #%d", i + 1);
+                cg_interp_range = outer.line ? outer : e->as.interp.ranges[i];
+                const Expr *expr = e->as.interp.exprs[i];
+                WType type = infer(expr);
+                const char *spec = interp_spec(type);
+                if (!spec) interpolation_error(expr, type);
                 fputs(spec, o);
             }
             emit_c_chars(o, e->as.interp.lits[n], 1);
             fputc('"', o);
             for (int i = 0; i < n; i++) {
+                cg_interp_range = outer.line ? outer : e->as.interp.ranges[i];
                 fputs(", ", o);
                 WType pt = infer(e->as.interp.exprs[i]);
                 if (pt == WT_INT || pt == WT_BOOL) {
@@ -373,6 +423,7 @@ static void emit_expr(FILE *o, const Expr *e) {
                 }
             }
             fputc(')', o);
+            cg_interp_range = outer;
             break;
         }
         case EX_IDENT:
@@ -1226,6 +1277,7 @@ int wind_codegen(const Program *p, FILE *out, WindDiagnostics *diags, int gc_str
     cg_diags = diags;
     cg_stmt = cg_func = NULL;
     cg_source = NULL;
+    cg_interp_range = (WindRange){0};
     unsigned previous = diags->count;
     g_nglob = g_nloc = g_nfunc = g_rep_id = 0;
     g_gc_strings = gc_strings;

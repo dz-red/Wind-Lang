@@ -15,20 +15,28 @@ static const char *explanation(WindDiagCode code) {
             return "Тип после `->` в сигнатуре определяет, что функция возвращает.\n"
                    "  Например, `100` имеет тип `int`, а `\"100\"` — тип `str`.\n"
                    "  `void` означает, что функция не возвращает значение.";
+        case WD_INTERPOLATION:
+            return "В `${...}` можно подставить `int`, `frac`, `str` или `bool`.\n"
+                   "  Если пишешь тип перед именем, например `str.title`,\n"
+                   "  он должен совпадать с типом переменной. Префикс можно опустить.";
         default: return NULL;
     }
 }
 
 int wind_diag_explain(const char *code) {
-    for (int i = WD_TERMINAL; i <= WD_RETURN; i++) {
-        const char *text = explanation((WindDiagCode)i);
+    const WindDiagCode codes[] = {WD_TERMINAL, WD_RETURN, WD_INTERPOLATION};
+    for (size_t i = 0; i < sizeof codes / sizeof *codes; i++) {
+        WindDiagCode id = codes[i];
+        const char *text = explanation(id);
         if (!text) continue;
         char name[16];
-        snprintf(name, sizeof name, "W%04d", i);
+        snprintf(name, sizeof name, "W%04d", id);
         if (strcmp(name, code) == 0) {
             printf("%s\n  %s\n", name, text);
-            if (i == WD_TERMINAL) puts("\n  Пример: terminal.paste -> \"Hello\"");
-            if (i == WD_RETURN) puts("\n  Пример:\n    func price() -> int\n        return 100\n    end");
+            if (id == WD_TERMINAL) puts("\n  Пример: terminal.paste -> \"Hello\"");
+            if (id == WD_RETURN) puts("\n  Пример:\n    func price() -> int\n        return 100\n    end");
+            if (id == WD_INTERPOLATION)
+                puts("\n  Пример:\n    str.title = \"Wind\"\n    terminal.paste -> \"=== ${title} ===\"");
             return 1;
         }
     }

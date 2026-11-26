@@ -14,7 +14,8 @@ extern const char *current_file;
 typedef enum { DIAG_NORMAL, DIAG_COMPACT, DIAG_LEARN, DIAG_SIMPLE } WindDiagMode;
 typedef enum {
     WD_LEX = 1000, WD_TERMINAL = 1001, WD_PARSE = 1002,
-    WD_RETURN = 2001, WD_CODEGEN = 2002, WD_MODULE = 3001, WD_IO = 3002, WD_GCC = 3003
+    WD_RETURN = 2001, WD_CODEGEN = 2002, WD_INTERPOLATION = 2003,
+    WD_MODULE = 3001, WD_IO = 3002, WD_GCC = 3003
 } WindDiagCode;
 
 typedef struct {

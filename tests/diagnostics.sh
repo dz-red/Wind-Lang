@@ -72,6 +72,33 @@ grep -F 'missing.wnd:1:5: error[W3001]: cannot read module' error
 reject --diag=invalid lex.wnd
 grep -F 'unknown diagnostic mode' error
 
+cat > interp.wnd <<'EOF'
+str.title = "Wind"
+terminal.paste -> "=== ${st.title} ==="
+EOF
+reject --diag=learn interp.wnd
+cp error default
+reject --diag=learn -s interp.wnd
+cmp default error
+reject -s --diag=learn interp.wnd
+cmp default error
+grep -Fx 'error[W2003]: неизвестный префикс типа `st`' error
+grep -Fx '  --> interp.wnd:2:26' error
+grep -Fx '  │                          ^^^^^^^^' error
+grep -F '`${str.title}` или просто `${title}`' error
+grep -Fx '  wind --explain W2003' error
+reject --diag=compact -s interp.wnd
+grep -Fx 'interp.wnd:2:26: error[W2003]: unknown type prefix `st` for `title`' error
+"$wind" --explain W2003 > explain
+grep -F '${title}' explain
+
+cat > escaped.wnd <<'EOF'
+str.title = "Wind"
+terminal.paste -> "\"${title}\"\n${  st.title  }"
+EOF
+reject --diag=compact escaped.wnd
+grep -Fx 'escaped.wnd:2:38: error[W2003]: unknown type prefix `st` for `title`' error
+
 printf 'func answer() -> int\n    return int("42")\nend\n' > good.wnd
 PATH=/nonexistent "$wind" --check good.wnd
 test ! -e output_ast.c
