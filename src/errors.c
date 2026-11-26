@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -54,20 +55,33 @@ int wind_diag_mode(const char *value, WindDiagMode *mode) {
 WindSource *wind_source_open(WindDiagnostics *diags, const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
-    long size = ftell(f);
-    if (size < 0 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
+    WindSource *src = wind_source_read(diags, path, f);
+    fclose(f);
+    return src;
+}
+
+WindSource *wind_source_read(WindDiagnostics *diags, const char *path, FILE *stream) {
+    size_t size = 0, cap = 4096;
+    char *text = malloc(cap);
+    if (!text) return NULL;
+    for (;;) {
+        size_t room = cap - size - 1;
+        size_t n = fread(text + size, 1, room, stream);
+        size += n;
+        if (n < room) break;
+        char *grown = cap <= SIZE_MAX / 2 ? realloc(text, cap * 2) : NULL;
+        if (!grown) { free(text); return NULL; }
+        text = grown;
+        cap *= 2;
+    }
+    if (ferror(stream)) { free(text); return NULL; }
     WindSource *src = malloc(sizeof *src);
-    char *text = malloc((size_t)size + 1), *name = malloc(strlen(path) + 1);
-    if (!src || !text || !name) {
-        fclose(f); free(src); free(text); free(name);
+    char *name = malloc(strlen(path) + 1);
+    if (!src || !name) {
+        free(src); free(text); free(name);
         return NULL;
     }
-    size_t read = fread(text, 1, (size_t)size, f);
-    int failed = ferror(f);
-    fclose(f);
-    if (failed) { free(src); free(text); free(name); return NULL; }
-    text[read] = '\0';
+    text[size] = '\0';
     strcpy(name, path);
     *src = (WindSource){name, text, diags->sources};
     diags->sources = src;
@@ -137,9 +151,46 @@ static void location(const char *path, WindRange range) {
     if (range.line > 0) fprintf(stderr, ":%d:%d", range.line, range.col);
 }
 
+static void json_string(const char *s) {
+    fputc('"', stderr);
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') fprintf(stderr, "\\%c", c);
+        else if (c < 32) fprintf(stderr, "\\u%04x", c);
+        else fputc(c, stderr);
+    }
+    fputc('"', stderr);
+}
+
+static void json_range(WindRange r) {
+    fprintf(stderr, "{\"line\":%d,\"column\":%d,\"endLine\":%d,\"endColumn\":%d}",
+            r.line, r.col, r.end_line, r.end_col);
+}
+
+static void json_diagnostic(const WindDiagnostic *d, const char *path) {
+    fprintf(stderr, "{\"code\":\"W%04d\",\"severity\":\"error\",\"file\":", d->code);
+    json_string(path);
+    fputs(",\"message\":", stderr);
+    json_string(d->message);
+    if (d->primary.line) { fputs(",\"range\":", stderr); json_range(d->primary); }
+    if (d->note) { fputs(",\"note\":", stderr); json_string(d->note); }
+    if (d->secondary.line) {
+        fputs(",\"related\":{\"range\":", stderr);
+        json_range(d->secondary);
+        fputs(",\"message\":", stderr);
+        json_string(d->secondary_label ? d->secondary_label : "Related location");
+        fputc('}', stderr);
+    }
+    fputs("}\n", stderr);
+}
+
 void wind_diag_emit(WindDiagnostics *diags, const WindDiagnostic *d) {
     const char *path = d->source ? d->source->path : current_file;
     diags->count++;
+    if (diags->mode == DIAG_JSON) {
+        json_diagnostic(d, path);
+        return;
+    }
     if (diags->mode == DIAG_COMPACT || diags->mode == DIAG_SIMPLE) {
         location(path, d->primary);
         if (diags->mode == DIAG_SIMPLE) fprintf(stderr, ": error: %s\n", d->message);
@@ -171,7 +222,7 @@ void wind_diag_emit(WindDiagnostics *diags, const WindDiagnostic *d) {
 }
 
 void wind_diag_summary(const WindDiagnostics *diags) {
-    if (diags->count && diags->mode != DIAG_SIMPLE)
+    if (diags->count && diags->mode != DIAG_SIMPLE && diags->mode != DIAG_JSON)
         fprintf(stderr, "[wind] compilation failed: %u error%s\n", diags->count,
                 diags->count == 1 ? "" : "s");
 }

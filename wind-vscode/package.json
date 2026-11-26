@@ -1,16 +1,39 @@
 {
   "name": "wind-language",
   "displayName": "Wind Language",
-  "description": "Syntax highlighting + realtime error diagnostics for Wind (.wnd)",
-  "version": "0.3.0",
+  "description": "Syntax highlighting and live diagnostics for Wind (.wnd)",
+  "version": "0.4.0",
   "publisher": "DZ-RED",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dz-red/Wind-Lang.git",
+    "directory": "wind-vscode"
+  },
   "readme": "README.md",
   "icon": "images/icon.png",
   "engines": { "vscode": "^1.60.0" },
   "main": "./extension.js",
   "activationEvents": ["onLanguage:wind"],
   "categories": ["Programming Languages", "Linters"],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Syntax highlighting is available. Live diagnostics require workspace trust to run the Wind compiler.",
+      "restrictedConfigurations": ["wind.compilerPath"]
+    }
+  },
   "contributes": {
+    "configuration": {
+      "title": "Wind",
+      "properties": {
+        "wind.compilerPath": {
+          "type": "string",
+          "scope": "resource",
+          "default": "",
+          "description": "Wind compiler executable. Relative paths are resolved from the workspace folder. If unset, search the workspace first, then PATH."
+        }
+      }
+    },
     "languages": [{
       "id": "wind",
       "aliases": ["Wind", "wnd"],
@@ -24,7 +47,9 @@
     "grammars": [{
       "language": "wind",
       "scopeName": "source.wnd",
-      "path": "./syntaxes/wind.tmLanguage.json"
+      "path": "./syntaxes/wind.tmLanguage.json",
+      "embeddedLanguages": { "meta.embedded.expression.wnd": "wind" },
+      "tokenTypes": { "meta.embedded.expression.wnd": "other" }
     }]
   }
 }

@@ -1,148 +1,155 @@
 const vscode = require('vscode');
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
+const { readDiagnostics, rangeFor, findCompiler, checkCommand } = require('./diagnostics');
 
-let diagCollection;
-let debounceTimers = new Map();
 const DEBOUNCE_MS = 400;
-
 const IN_FLATPAK = fs.existsSync('/.flatpak-info');
+const pending = new Map();
+const results = new Map();
+let collection, output;
+
+function isWind(doc) {
+    return doc.languageId === 'wind' && doc.uri.scheme === 'file';
+}
 
 function activate(context) {
-    diagCollection = vscode.languages.createDiagnosticCollection('wind');
-    context.subscriptions.push(diagCollection);
-
-    context.subscriptions.push(
-        vscode.workspace.onDidChangeTextDocument(e => {
-            if (e.document.languageId !== 'wind') return;
-            scheduleCheck(e.document);
-        })
-    );
-
-    context.subscriptions.push(
-        vscode.workspace.onDidOpenTextDocument(doc => {
-            if (doc.languageId === 'wind') checkDocument(doc);
-        })
-    );
-
-    context.subscriptions.push(
-        vscode.workspace.onDidSaveTextDocument(doc => {
-            if (doc.languageId === 'wind') checkDocument(doc);
-        })
-    );
-
-    context.subscriptions.push(
+    collection = vscode.languages.createDiagnosticCollection('wind');
+    output = vscode.window.createOutputChannel('Wind');
+    const refresh = () => vscode.workspace.textDocuments.filter(isWind).forEach(doc => schedule(doc));
+    context.subscriptions.push(collection, output,
+        vscode.workspace.onDidOpenTextDocument(doc => schedule(doc)),
+        vscode.workspace.onDidChangeTextDocument(({ document, contentChanges }) => {
+            if (contentChanges.length) schedule(document, DEBOUNCE_MS);
+        }),
+        vscode.workspace.onDidSaveTextDocument(doc => { if (isWind(doc)) refresh(); }),
         vscode.workspace.onDidCloseTextDocument(doc => {
-            diagCollection.delete(doc.uri);
-            const t = debounceTimers.get(doc.uri.toString());
-            if (t) { clearTimeout(t); debounceTimers.delete(doc.uri.toString()); }
+            const key = doc.uri.toString();
+            cancel(key);
+            publish(key, new Map());
+        }),
+        vscode.workspace.onDidGrantWorkspaceTrust(refresh),
+        vscode.workspace.onDidChangeConfiguration(event => {
+            if (event.affectsConfiguration('wind.compilerPath')) refresh();
         })
     );
-
-    vscode.workspace.textDocuments.forEach(doc => {
-        if (doc.languageId === 'wind') checkDocument(doc);
-    });
+    refresh();
 }
 
-function scheduleCheck(doc) {
+function cancel(key) {
+    const job = pending.get(key);
+    if (!job) return;
+    pending.delete(key);
+    clearTimeout(job.timer);
+    if (job.child && job.child.exitCode === null) job.child.kill();
+}
+
+function schedule(doc, delay = 0) {
+    if (!isWind(doc) || !vscode.workspace.isTrusted) return;
     const key = doc.uri.toString();
-    const existing = debounceTimers.get(key);
-    if (existing) clearTimeout(existing);
-    const t = setTimeout(() => {
-        debounceTimers.delete(key);
-        checkDocument(doc);
-    }, DEBOUNCE_MS);
-    debounceTimers.set(key, t);
+    cancel(key);
+    const job = { version: doc.version };
+    pending.set(key, job);
+    job.timer = setTimeout(() => check(doc, key, job), delay);
 }
 
-function checkDocument(doc) {
-    const origPath = doc.uri.fsPath;
-    if (!origPath) return;
-
-    const projectDir = findProjectDir(origPath);
-    if (!projectDir) {
-        diagCollection.set(doc.uri, []);
-        return;
-    }
-    const windBin = path.join(projectDir, 'wind');
-
-    /* Пишем текущий буфер во временный файл — он может отличаться от диска. */
-    const tmpFile = path.join(os.tmpdir(), `wind_check_${process.pid}_${Date.now()}.wnd`);
-    try {
-        fs.writeFileSync(tmpFile, doc.getText());
-    } catch (e) {
-        return;
-    }
-
-    const cmd = IN_FLATPAK
-        ? `flatpak-spawn --host "${windBin}" --check --errors-simple "${tmpFile}"`
-        : `"${windBin}" --check --errors-simple "${tmpFile}"`;
-
-    exec(cmd, { cwd: projectDir, timeout: 5000 }, (err, stdout, stderr) => {
-        try { fs.unlinkSync(tmpFile); } catch (e) {}
-        const output = (stdout || '') + (stderr || '');
-        const diagnostics = parseDiagnostics(output, doc, tmpFile);
-        diagCollection.set(doc.uri, diagnostics);
-    });
+function current(doc, key, job) {
+    return pending.get(key) === job && !doc.isClosed && doc.version === job.version;
 }
 
-function findProjectDir(filePath) {
-    let dir = path.dirname(filePath);
-    for (let i = 0; i < 5; i++) {
-        if (fs.existsSync(path.join(dir, 'wind'))) return dir;
-        const parent = path.dirname(dir);
-        if (parent === dir) break;
-        dir = parent;
-    }
-    return null;
-}
-
-function parseDiagnostics(output, doc, tmpFile) {
-    const re = /^(.+?):(\d+):(\d+):\s*(error|note|warning):\s*(.+)$/gm;
-    const lastError = new Map(); // line → { msg, range } для прикрепления note
-    const diagnostics = [];
-    let m;
-    while ((m = re.exec(output)) !== null) {
-        const [, , lineStr, colStr, severity, message] = m;
-        const lineNum = parseInt(lineStr, 10) - 1;
-        const colNum = parseInt(colStr, 10) - 1;
-        if (lineNum < 0 || lineNum >= doc.lineCount) continue;
-        const lineText = doc.lineAt(lineNum).text;
-        const range = new vscode.Range(
-            lineNum, Math.min(colNum, lineText.length),
-            lineNum, lineText.length
-        );
-        if (severity === 'note') {
-            /* note приклеиваем к последней error на той же строке. */
-            const prev = lastError.get(lineNum);
-            if (prev) {
-                prev.diag.message = prev.diag.message + ' (' + message + ')';
-                continue;
+function check(doc, key, job) {
+    if (!current(doc, key, job)) return;
+    const file = doc.uri.fsPath;
+    const workspace = vscode.workspace.getWorkspaceFolder(doc.uri);
+    const configured = vscode.workspace.getConfiguration('wind', doc.uri).get('compilerPath', '');
+    const compiler = findCompiler(file, workspace?.uri.fsPath, configured);
+    const cwd = path.dirname(file);
+    const [command, args] = checkCommand(compiler, file, IN_FLATPAK, cwd);
+    const text = doc.getText();
+    job.child = execFile(command, args, { cwd, timeout: 5000, maxBuffer: 1024 * 1024, windowsHide: true },
+        async (error, stdout, stderr) => {
+            if (!current(doc, key, job)) return;
+            let groups = new Map();
+            try {
+                const entries = readDiagnostics(stderr);
+                if (error && !entries.length) {
+                    const reason = stderr.trim() || stdout.trim() || error.message;
+                    output.appendLine(`Cannot check ${file}: ${reason}`);
+                } else {
+                    groups = await makeDiagnostics(entries, doc, text);
+                }
+            } catch (error) {
+                output.appendLine(`Cannot read diagnostics for ${file}: ${error.message}`);
             }
-            diagnostics.push(new vscode.Diagnostic(range, message,
-                vscode.DiagnosticSeverity.Information));
-            continue;
+            if (!current(doc, key, job)) return;
+            pending.delete(key);
+            publish(key, groups);
+        });
+    job.child.stdin.on('error', () => {});
+    job.child.stdin.end(text, 'utf8');
+}
+
+async function makeDiagnostics(entries, doc, text) {
+    const root = path.resolve(doc.uri.fsPath);
+    const files = new Map();
+    const groups = new Map();
+    for (const entry of entries) {
+        const file = path.resolve(path.dirname(root), entry.file);
+        if (!files.has(file)) {
+            const uri = file === root ? doc.uri : vscode.Uri.file(file);
+            const open = vscode.workspace.textDocuments.find(item => item.uri.toString() === uri.toString());
+            const source = file === root ? text :
+                open?.isDirty ? null : await fs.promises.readFile(file, 'utf8').catch(() => null);
+            files.set(file, { uri, lines: source?.split(/\r?\n/) });
         }
-        const sev = severity === 'warning'
-            ? vscode.DiagnosticSeverity.Warning
-            : vscode.DiagnosticSeverity.Error;
-        const diag = new vscode.Diagnostic(range, message, sev);
-        diag.source = 'wind';
-        diagnostics.push(diag);
-        lastError.set(lineNum, { diag });
+        const { uri, lines } = files.get(file);
+        if (!lines) continue;
+        const primary = rangeFor(lines, entry.range);
+        if (!primary) continue;
+        const message = entry.note ? `${entry.message}\n${entry.note}` : entry.message;
+        const diagnostic = new vscode.Diagnostic(new vscode.Range(...primary), message, vscode.DiagnosticSeverity.Error);
+        diagnostic.source = 'Wind';
+        diagnostic.code = entry.code;
+        const related = rangeFor(lines, entry.related?.range);
+        if (entry.related && related) {
+            diagnostic.relatedInformation = [new vscode.DiagnosticRelatedInformation(
+                new vscode.Location(uri, new vscode.Range(...related)), entry.related.message
+            )];
+        }
+        const key = uri.toString();
+        if (!groups.has(key)) groups.set(key, { uri, diagnostics: [] });
+        groups.get(key).diagnostics.push(diagnostic);
     }
-    return diagnostics;
+    return groups;
+}
+
+function publish(root, groups) {
+    const old = results.get(root) || new Map();
+    if (groups.size) results.set(root, groups);
+    else results.delete(root);
+    const touched = new Map([...old, ...groups]);
+    if (!touched.has(root)) touched.set(root, { uri: vscode.Uri.parse(root) });
+    for (const [key, { uri }] of touched) {
+        const unique = new Map();
+        const dirty = vscode.workspace.textDocuments.some(doc => doc.isDirty && doc.uri.toString() === key);
+        for (const [owner, result] of results) {
+            if (dirty && key !== owner) continue;
+            for (const diagnostic of result.get(key)?.diagnostics || []) {
+                const { start, end } = diagnostic.range;
+                const id = JSON.stringify([diagnostic.code, diagnostic.message,
+                    start.line, start.character, end.line, end.character]);
+                unique.set(id, diagnostic);
+            }
+        }
+        if (unique.size) collection.set(uri, [...unique.values()]);
+        else collection.delete(uri);
+    }
 }
 
 function deactivate() {
-    if (diagCollection) {
-        diagCollection.clear();
-        diagCollection.dispose();
-    }
-    for (const t of debounceTimers.values()) clearTimeout(t);
-    debounceTimers.clear();
+    for (const key of pending.keys()) cancel(key);
+    results.clear();
 }
 
 module.exports = { activate, deactivate };

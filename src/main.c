@@ -6,6 +6,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 #ifndef _WIN32
 #include <errno.h>
 #include <sys/wait.h>
@@ -78,16 +83,17 @@ static void print_help(const char *prog) {
         "  %s -s <file.wnd>    compile AND run immediately\n"
         "  %s --ast <file.wnd> print the AST and exit\n"
         "  %s --check <file.wnd> check Wind code without running GCC\n"
+        "  %s --check --stdin --diag-json <file.wnd> check an editor buffer with its real path\n"
         "  %s --diag=compact|normal|learn <file.wnd> choose diagnostics (default: normal)\n"
         "  %s --explain W2001  explain a diagnostic code\n"
         "  %s --wgc <file.wnd> use WGC (the default on Linux)\n"
         "  %s --boehm <file.wnd> use the legacy Boehm collector\n"
         "  %s --help           this help\n",
-        prog, prog, prog, prog, prog, prog, prog, prog, prog);
+        prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
 }
 
 int main(int argc, char *argv[]) {
-    int run_after = 0, mode_ast = 0, mode_check = 0;
+    int run_after = 0, mode_ast = 0, mode_check = 0, from_stdin = 0;
     WindDiagnostics diags = {0};
     if (argc == 3 && !strcmp(argv[1], "--explain")) {
         if (wind_diag_explain(argv[2])) return 0;
@@ -108,6 +114,10 @@ int main(int argc, char *argv[]) {
             mode_ast = 1;
         } else if (strcmp(argv[i], "--check") == 0) {
             mode_check = 1;
+        } else if (strcmp(argv[i], "--stdin") == 0) {
+            from_stdin = 1;
+        } else if (strcmp(argv[i], "--diag-json") == 0) {
+            diags.mode = DIAG_JSON;
         } else if (strncmp(argv[i], "--diag=", 7) == 0) {
             if (!wind_diag_mode(argv[i] + 7, &diags.mode)) {
                 fprintf(stderr, "[wind] unknown diagnostic mode: %s (use compact, normal or learn)\n", argv[i] + 7);
@@ -138,6 +148,10 @@ int main(int argc, char *argv[]) {
     }
 
     if (!input) { print_help(argv[0]); return 1; }
+    if ((from_stdin || diags.mode == DIAG_JSON) && (!mode_check || mode_ast || run_after)) {
+        fputs("[wind] --stdin and --diag-json are only available with --check\n", stderr);
+        return 1;
+    }
 #ifdef _WIN32
     if (gc_strings) {
         fprintf(stderr, "[wind] --wgc is not available on Windows\n");
@@ -147,7 +161,10 @@ int main(int argc, char *argv[]) {
     current_file = input;
 
     Program prog = {0};
-    WindSource *src = wind_source_open(&diags, input);
+#ifdef _WIN32
+    if (from_stdin) _setmode(_fileno(stdin), _O_BINARY);
+#endif
+    WindSource *src = from_stdin ? wind_source_read(&diags, input, stdin) : wind_source_open(&diags, input);
     if (!src) {
         wind_diag_emit(&diags, &(WindDiagnostic){.code = WD_IO, .message = "cannot read source file"});
         goto failed;

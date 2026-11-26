@@ -2,6 +2,7 @@
 #define WIND_ERRORS_H
 
 #include <stddef.h>
+#include <stdio.h>
 
 #define C_RST "\033[0m"
 #define C_RED "\033[1;31m"
@@ -11,7 +12,7 @@
 
 extern const char *current_file;
 
-typedef enum { DIAG_NORMAL, DIAG_COMPACT, DIAG_LEARN, DIAG_SIMPLE } WindDiagMode;
+typedef enum { DIAG_NORMAL, DIAG_COMPACT, DIAG_LEARN, DIAG_SIMPLE, DIAG_JSON } WindDiagMode;
 typedef enum {
     WD_LEX = 1000, WD_TERMINAL = 1001, WD_PARSE = 1002,
     WD_RETURN = 2001, WD_CODEGEN = 2002, WD_INTERPOLATION = 2003,
@@ -42,6 +43,7 @@ typedef struct {
 } WindDiagnostic;
 
 WindSource *wind_source_open(WindDiagnostics *diags, const char *path);
+WindSource *wind_source_read(WindDiagnostics *diags, const char *path, FILE *stream);
 void wind_diag_emit(WindDiagnostics *diags, const WindDiagnostic *diag);
 void wind_diag_summary(const WindDiagnostics *diags);
 void wind_diag_free(WindDiagnostics *diags);

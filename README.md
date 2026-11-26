@@ -91,7 +91,7 @@ LANGUAGE.md     справочник по языку, каждый пример 
 demo.wnd        HTTP-сервер
 backend.wnd     пример побольше
 jregress.wnd    регрессионные проверки JSON
-wind-vscode/    расширение для VS Code: подсветка, иконки файлов
+wind-vscode/    расширение для VS Code: подсветка, иконки и диагностика в редакторе
 templates/      HTML-шаблоны для веб-примеров
 ```
 
