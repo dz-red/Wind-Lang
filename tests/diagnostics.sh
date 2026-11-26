@@ -2,6 +2,7 @@
 set -eu
 
 wind=$(realpath "${1:-./wind}")
+tests=$(dirname "$(realpath "$0")")
 tmp=$(mktemp -d)
 trap 'rm -f "$tmp"/*.wnd "$tmp/error" "$tmp/expected" "$tmp/default" "$tmp/explain"; rmdir "$tmp"' EXIT
 cd "$tmp"
@@ -108,4 +109,7 @@ printf 'func answer() -> int\n    return int("42")\nend\n' > good.wnd
 PATH=/nonexistent "$wind" --check good.wnd
 test ! -e output_ast.c
 test ! -e app
+if command -v python3 > /dev/null; then
+    python3 "$tests/diagnostic-colors.py" "$wind" returns.wnd
+fi
 printf '%s\n' 'Diagnostics: OK'

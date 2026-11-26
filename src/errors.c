@@ -3,9 +3,54 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
+#define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004
+#endif
+#else
+#include <unistd.h>
+#endif
+
 #include "errors.h"
 
 const char *current_file = "<stdin>";
+
+typedef struct {
+    const char *red, *yellow, *green, *cyan, *reset;
+} DiagStyle;
+
+static const DiagStyle plain = {"", "", "", "", ""};
+static const DiagStyle colored = {C_RED, C_YEL, C_GRN, C_CYN, C_RST};
+
+#ifdef _WIN32
+static HANDLE console;
+static DWORD original_console_mode;
+
+static void restore_console_mode(void) {
+    SetConsoleMode(console, original_console_mode);
+}
+#endif
+
+static const DiagStyle *diag_style(void) {
+    const char *no_color = getenv("NO_COLOR");
+    const char *term = getenv("TERM");
+    if ((no_color && *no_color) || (term && !strcmp(term, "dumb"))) return &plain;
+#ifdef _WIN32
+    HANDLE handle = GetStdHandle(STD_ERROR_HANDLE);
+    DWORD mode;
+    if (!GetConsoleMode(handle, &mode)) return &plain;
+    if (!(mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING)) {
+        if (!SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING)) return &plain;
+        console = handle;
+        original_console_mode = mode;
+        atexit(restore_console_mode);
+    }
+    return &colored;
+#else
+    return isatty(STDERR_FILENO) ? &colored : &plain;
+#endif
+}
 
 static const char *explanation(WindDiagCode code) {
     switch (code) {
@@ -125,7 +170,8 @@ static int columns(const char *s, size_t len, int print) {
     return width;
 }
 
-static void excerpt(const WindSource *src, WindRange r, const char *label, int gutter, int primary) {
+static void excerpt(const WindSource *src, WindRange r, const char *label, int gutter,
+                    int primary, const DiagStyle *style) {
     const char *s = source_line(src, r.line);
     if (!s) return;
     size_t len = strcspn(s, "\n");
@@ -134,16 +180,17 @@ static void excerpt(const WindSource *src, WindRange r, const char *label, int g
     size_t end = r.end_line > r.line ? len : r.end_col > 0 ? (size_t)r.end_col - 1 : start;
     if (start > len) start = len;
     if (end > len) end = len;
-    fprintf(stderr, "%*d │ ", gutter, r.line);
+    fprintf(stderr, "%s%*d │%s ", style->cyan, gutter, r.line, style->reset);
     columns(s, len, 1);
     fputc('\n', stderr);
     int offset = columns(s, start, 0);
     int width = columns(s, end, 0) - offset;
-    fprintf(stderr, "%*s │ %*s", gutter, "", offset, "");
+    fprintf(stderr, "%s%*s │%s %*s%s", style->cyan, gutter, "", style->reset,
+            offset, "", primary ? style->red : style->yellow);
     do { fputs(primary ? "^" : "─", stderr); } while (--width > 0);
     if (label) fprintf(stderr, " %s", label);
     if (r.end_line > r.line) fputs(" …", stderr);
-    fputc('\n', stderr);
+    fprintf(stderr, "%s\n", style->reset);
 }
 
 static void location(const char *path, WindRange range) {
@@ -191,38 +238,49 @@ void wind_diag_emit(WindDiagnostics *diags, const WindDiagnostic *d) {
         json_diagnostic(d, path);
         return;
     }
-    if (diags->mode == DIAG_COMPACT || diags->mode == DIAG_SIMPLE) {
+    if (diags->mode == DIAG_SIMPLE) {
         location(path, d->primary);
-        if (diags->mode == DIAG_SIMPLE) fprintf(stderr, ": error: %s\n", d->message);
-        else fprintf(stderr, ": error[W%04d]: %s\n", d->code, d->message);
+        fprintf(stderr, ": error: %s\n", d->message);
         return;
     }
 
-    fprintf(stderr, "error[W%04d]: %s\n  --> ", d->code, d->title ? d->title : d->message);
+    const DiagStyle *style = diag_style();
+    if (diags->mode == DIAG_COMPACT) {
+        fputs(style->cyan, stderr);
+        location(path, d->primary);
+        fprintf(stderr, "%s: %serror[W%04d]%s: %s\n",
+                style->reset, style->red, d->code, style->reset, d->message);
+        return;
+    }
+
+    fprintf(stderr, "%serror[W%04d]%s: %s\n%s  --> ", style->red, d->code, style->reset,
+            d->title ? d->title : d->message, style->cyan);
     location(path, d->primary);
-    fputc('\n', stderr);
+    fprintf(stderr, "%s\n", style->reset);
     if (d->source && d->primary.line) {
         int last = d->primary.line > d->secondary.line ? d->primary.line : d->secondary.line;
         int gutter = 1;
         for (; last >= 10; last /= 10) gutter++;
-        fprintf(stderr, "%*s │\n", gutter, "");
-        excerpt(d->source, d->secondary, d->secondary_label, gutter, 0);
+        fprintf(stderr, "%s%*s │%s\n", style->cyan, gutter, "", style->reset);
+        excerpt(d->source, d->secondary, d->secondary_label, gutter, 0, style);
         if (d->secondary.line && d->primary.line - d->secondary.line > 1)
-            fprintf(stderr, "%*s │ …\n", gutter, "");
-        excerpt(d->source, d->primary, d->label, gutter, 1);
+            fprintf(stderr, "%s%*s │ …%s\n", style->cyan, gutter, "", style->reset);
+        excerpt(d->source, d->primary, d->label, gutter, 1, style);
     }
-    if (d->note) fprintf(stderr, "note: %s\n", d->note);
+    if (d->note) fprintf(stderr, "%snote:%s %s\n", style->yellow, style->reset, d->note);
     const char *text = explanation(d->code);
     if (diags->mode == DIAG_LEARN && text) {
-        fprintf(stderr, "\nEXPLANATION\n  %s\n", text);
-        if (d->suggestions) fprintf(stderr, "\nSUGGESTIONS\n  %s\n", d->suggestions);
-        fprintf(stderr, "\nDETAILS\n  wind --explain W%04d\n", d->code);
+        fprintf(stderr, "\n%sEXPLANATION%s\n  %s\n", style->cyan, style->reset, text);
+        if (d->suggestions)
+            fprintf(stderr, "\n%sSUGGESTIONS\n  %s%s\n", style->green, d->suggestions, style->reset);
+        fprintf(stderr, "\n%sDETAILS%s\n  wind --explain W%04d\n", style->cyan, style->reset, d->code);
     }
     fputc('\n', stderr);
 }
 
 void wind_diag_summary(const WindDiagnostics *diags) {
-    if (diags->count && diags->mode != DIAG_SIMPLE && diags->mode != DIAG_JSON)
-        fprintf(stderr, "[wind] compilation failed: %u error%s\n", diags->count,
-                diags->count == 1 ? "" : "s");
+    if (!diags->count || diags->mode == DIAG_SIMPLE || diags->mode == DIAG_JSON) return;
+    const DiagStyle *style = diag_style();
+    fprintf(stderr, "%s[wind]%s compilation failed: %s%u error%s%s\n", style->cyan,
+            style->reset, style->red, diags->count, diags->count == 1 ? "" : "s", style->reset);
 }
