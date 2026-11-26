@@ -8,6 +8,9 @@ struct WindGcBlock;
 /* Начальное состояние: WindGc gc = {0};. Не копируй непустую кучу. */
 typedef struct {
     struct WindGcBlock *head;
+    struct WindGcBlock **index;
+    size_t capacity;
+    size_t count;
 } WindGc;
 
 /* Память принадлежит куче: не передавай её в free или realloc.

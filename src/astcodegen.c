@@ -23,7 +23,7 @@ static Sym      g_glob[256]; static int g_nglob;
 static Sym      g_loc[256];  static int g_nloc;     /* сбрасывается на каждую функцию/main */
 static FuncSig  g_func[256]; static int g_nfunc;
 static int      g_rep_id;                            /* уникальные счётчики repeat-циклов */
-static int      g_gc_strings, g_in_main, g_gc_id;
+static int      g_gc_strings, g_in_main, g_gc_id, g_volatile, g_sqlite3;
 
 static void cg_fail(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
@@ -52,6 +52,18 @@ static WType var_type(const char *name) {
 }
 static WType func_ret(const char *name) {
     for (int i = 0; i < g_nfunc; i++) if (!strcmp(g_func[i].name, name)) return g_func[i].ret;
+    return WT_UNKNOWN;
+}
+
+static WType native_ret(const char *name) {
+    if (g_sqlite3 && !strcmp(name, "sqlite3_libversion")) return WT_STR;
+    if (!g_gc_strings) return WT_UNKNOWN;
+    static const char *names[] = {
+        "acos", "asin", "atan", "atan2", "ceil", "cos", "exp", "fabs", "floor",
+        "fmod", "hypot", "log", "log10", "pow", "round", "sin", "sqrt", "tan"
+    };
+    for (size_t i = 0; i < sizeof names / sizeof *names; i++)
+        if (!strcmp(names[i], name)) return WT_FRAC;
     return WT_UNKNOWN;
 }
 
@@ -209,7 +221,8 @@ static WType infer(const Expr *e) {
                 if (!strcmp(c->as.ident, "str") || !strcmp(c->as.ident, "to_str")) return WT_STR;
                 if (!strcmp(c->as.ident, "bool")) return WT_BOOL;
                 if (!strcmp(c->as.ident, "len")) return WT_INT;
-                return func_ret(c->as.ident);
+                WType t = func_ret(c->as.ident);
+                return t == WT_UNKNOWN ? native_ret(c->as.ident) : t;
             }
             return WT_UNKNOWN;
         }
@@ -280,8 +293,10 @@ static const char *binop_c(TokenKind op) {
 
 static void emit_var_ref(FILE *o, const Expr *e, int read) {
     const char *name = e->kind == EX_TYPED ? e->as.typed.name : e->as.ident;
-    WType t = e->kind == EX_TYPED ? typed_ref(e).elem : var_type(name);
-    if (g_gc_strings && read && t == WT_STR) fprintf(o, "WIND_STR_KEEP(%s)", name);
+    VType t = e->kind == EX_TYPED ? typed_ref(e) : var_vtype(name);
+    if (g_gc_strings && read && (t.ck == CK_LIST || t.ck == CK_DICT ||
+                                (t.ck == CK_SCALAR && (t.elem == WT_STR || t.elem == WT_JSON))))
+        fprintf(o, "WIND_STR_KEEP(%s)", name);
     else fputs(name, o);
 }
 
@@ -352,10 +367,6 @@ static void emit_expr(FILE *o, const Expr *e) {
             if (c->kind == EX_DOT) {
                 const Expr *obj = c->as.dot.obj;
                 const char *m = c->as.dot.field;
-                if (g_gc_strings && obj->kind == EX_IDENT &&
-                    (!strcmp(obj->as.ident, "file") || !strcmp(obj->as.ident, "json") ||
-                     !strcmp(obj->as.ident, "http")))
-                    cg_fail("--gc-strings does not support the %s module yet", obj->as.ident);
             if (obj->kind == EX_IDENT && !strcmp(obj->as.ident, "time")) {
                 if (!strcmp(m, "now"))   { fputs("_wtime_now()", o); break; }
                 if (!strcmp(m, "clock")) { fputs("_wtime_clock()", o); break; }
@@ -366,6 +377,8 @@ static void emit_expr(FILE *o, const Expr *e) {
                 cg_fail("module time has no method .%s", m);
             }
             if (obj->kind == EX_IDENT && !strcmp(obj->as.ident, "file")) {
+                int expected = (!strcmp(m, "write") || !strcmp(m, "append")) ? 2 : 1;
+                if (e->as.call.nargs != expected) cg_fail("file.%s expects %d argument(s)", m, expected);
                 if (!strcmp(m, "read"))   { fputs("_wf_read(", o); emit_expr(o, e->as.call.args[0]); fputc(')', o); break; }
                 if (!strcmp(m, "exists")) { fputs("_wf_exists(", o); emit_expr(o, e->as.call.args[0]); fputc(')', o); break; }
                 if (!strcmp(m, "write"))  { fputs("_wf_write(", o); emit_expr(o, e->as.call.args[0]); fputs(", ", o); emit_expr(o, e->as.call.args[1]); fputc(')', o); break; }
@@ -466,8 +479,10 @@ static void emit_expr(FILE *o, const Expr *e) {
             if (!strcmp(fn, "len") && e->as.call.nargs == 1) {
                 if (infer(e->as.call.args[0]) == WT_STR)
                     fputs("(int)strlen(", o);
-                else if (g_gc_strings)
-                    cg_fail("--gc-strings only supports len() of strings");
+                else if (g_gc_strings && coll_vtype(e->as.call.args[0]).ck == CK_DICT)
+                    fputs("_wd_len(", o);
+                else if (g_gc_strings && coll_vtype(e->as.call.args[0]).ck != CK_LIST)
+                    cg_fail("--gc-strings: len() expects a string, list or dictionary");
                 else
                     fputs("_wl_len(", o);
                 emit_expr(o, e->as.call.args[0]); fputc(')', o);
@@ -496,8 +511,13 @@ static void emit_expr(FILE *o, const Expr *e) {
                 }
                 break;
             }
-            if (g_gc_strings && func_ret(fn) == WT_UNKNOWN)
+            if (g_gc_strings && func_ret(fn) == WT_UNKNOWN && native_ret(fn) == WT_UNKNOWN)
                 cg_fail("--gc-strings: unknown function '%s'", fn);
+            if (g_gc_strings && func_ret(fn) == WT_UNKNOWN && native_ret(fn) == WT_STR) {
+                if (e->as.call.nargs) cg_fail("%s expects no arguments", fn);
+                fprintf(o, "wstr_dup(%s())", fn);
+                break;
+            }
             int keep = g_gc_strings && func_ret(fn) == WT_STR;
             if (keep) fputs("WIND_STR_KEEP(", o);
             fprintf(o, "%s(", fn);
@@ -510,9 +530,16 @@ static void emit_expr(FILE *o, const Expr *e) {
             break;
         }
         case EX_INDEX: {                              /* coll[idx]: массив / список / словарь */
-            if (g_gc_strings) cg_fail("--gc-strings does not support indexing yet");
             VType cv = coll_vtype(e->as.index.coll);
-            if (cv.ck == CK_LIST) {
+            int keep = g_gc_strings && cv.elem == WT_STR;
+            if (g_gc_strings && cv.ck == CK_SCALAR && cv.elem != WT_STR)
+                cg_fail("indexing requires a string, array, list or dictionary");
+            if (keep) fputs("WIND_STR_KEEP(", o);
+            if (g_gc_strings && cv.ck == CK_SCALAR) {
+                fputs("wind_str_at(", o);
+                emit_expr(o, e->as.index.coll); fputs(", ", o);
+                emit_expr(o, e->as.index.idx); fputc(')', o);
+            } else if (cv.ck == CK_LIST) {
                 fprintf(o, "_wl_get_%s(", list_suffix(cv.elem));
                 emit_expr(o, e->as.index.coll); fputs(", ", o);
                 emit_expr(o, e->as.index.idx); fputc(')', o);
@@ -527,6 +554,7 @@ static void emit_expr(FILE *o, const Expr *e) {
                 emit_expr(o, e->as.index.coll);
                 fputc('[', o); emit_expr(o, e->as.index.idx); fputc(']', o);
             }
+            if (keep) fputc(')', o);
             break;
         }
         case EX_DOT: {                                /* nums.len / cfg.len */
@@ -554,10 +582,32 @@ static void emit_expr(FILE *o, const Expr *e) {
 static void emit_block(FILE *o, const Block *b, int ind);
 static void indent(FILE *o, int n) { for (int i = 0; i < n; i++) fputs("    ", o); }
 
+static int needs_temps(const Expr *e) {
+    switch (e->kind) {
+        case EX_INTERP: case EX_CALL: return 1;
+        case EX_IDENT: case EX_TYPED: {
+            VType type = coll_vtype(e);
+            return type.ck == CK_LIST || type.ck == CK_DICT ||
+                   (type.ck == CK_SCALAR && (type.elem == WT_STR || type.elem == WT_JSON));
+        }
+        case EX_INDEX:
+            return coll_vtype(e->as.index.coll).elem == WT_STR ||
+                   needs_temps(e->as.index.coll) || needs_temps(e->as.index.idx);
+        case EX_DOT: return needs_temps(e->as.dot.obj);
+        case EX_GROUP: return needs_temps(e->as.group.inner);
+        case EX_UNARY: return needs_temps(e->as.unary.e);
+        case EX_BINARY:
+            return (e->as.binary.op == TK_PLUS && infer(e) == WT_STR) ||
+                   needs_temps(e->as.binary.l) || needs_temps(e->as.binary.r);
+        default: return 0;
+    }
+}
+
 static void emit_full_expr(FILE *o, const Expr *e) {
-    if (g_gc_strings) fputs("WIND_STR_EXPR(", o);
+    int protect = g_gc_strings && needs_temps(e);
+    if (protect) fputs("WIND_STR_EXPR(", o);
     emit_expr(o, e);
-    if (g_gc_strings) fputc(')', o);
+    if (protect) fputc(')', o);
 }
 
 static void emit_gc_root(FILE *o, const char *name, int ind) {
@@ -565,10 +615,68 @@ static void emit_gc_root(FILE *o, const char *name, int ind) {
     fprintf(o, "WIND_STR_ROOT(%s, %d);\n", name, g_gc_id++);
 }
 
+static void emit_gc_json_root(FILE *o, const char *name, int ind) {
+    indent(o, ind);
+    fprintf(o, "WIND_ROOT(&%s, %d, 1, _wj_trace_slots);\n", name, g_gc_id++);
+}
+
+static void emit_gc_collection_root(FILE *o, const char *name, VType type, int ind) {
+    if (!g_gc_strings) return;
+    if (type.ck == CK_LIST || type.ck == CK_DICT) {
+        indent(o, ind);
+        fprintf(o, "WIND_ROOT(&%s, %d, 1, %s);\n", name, g_gc_id++,
+                type.ck == CK_LIST ? "_wl_trace_slots" : "_wd_trace_slots");
+    } else if (type.ck == CK_ARRAY && type.elem == WT_STR) {
+        indent(o, ind);
+        fprintf(o, "WIND_ROOT(%s, %d, sizeof %s / sizeof *%s, wind_str_trace_slots);\n",
+                name, g_gc_id++, name, name);
+    }
+}
+
+static void emit_gc_expr_start(FILE *o) {
+    if (g_gc_strings) fputs("WIND_STR_EXPR(", o);
+}
+
+static void emit_gc_expr_end(FILE *o) {
+    if (g_gc_strings) fputc(')', o);
+}
+
+static void emit_list_items(FILE *o, const Stmt *s, WType el, int ind) {
+    const Expr *lst = s->as.decl.init;
+    if (!lst) return;
+    if (lst->kind != EX_LIST) cg_fail("list '%s' initializer expects a [..] literal", s->as.decl.name);
+    for (int i = 0; i < lst->as.list.n; i++) {
+        indent(o, ind);
+        emit_gc_expr_start(o);
+        fprintf(o, "_wl_push_%s(%s, ", list_suffix(el), s->as.decl.name);
+        emit_expr(o, lst->as.list.items[i]);
+        fputc(')', o);
+        emit_gc_expr_end(o);
+        fputs(";\n", o);
+    }
+}
+
+static void emit_dict_items(FILE *o, const Stmt *s, WType key, WType value, int ind) {
+    const Expr *d = s->as.decl.init;
+    if (!d) return;
+    if (d->kind != EX_DICT) cg_fail("dict '%s' initializer expects a [key: value, ...] literal", s->as.decl.name);
+    for (int i = 0; i < d->as.dict.n; i++) {
+        indent(o, ind);
+        emit_gc_expr_start(o);
+        fprintf(o, "_wd_set(%s, ", s->as.decl.name);
+        emit_dict_pack(o, key, d->as.dict.keys[i], 1);
+        fputs(", ", o);
+        emit_dict_pack(o, value, d->as.dict.vals[i], 1);
+        fputc(')', o);
+        emit_gc_expr_end(o);
+        fputs(";\n", o);
+    }
+}
+
 static void emit_gc_checkpoint(FILE *o, int ind) {
     if (!g_gc_strings) return;
     indent(o, ind);
-    fputs("wind_str_collect();\n", o);
+    fputs("WIND_CHECKPOINT();\n", o);
 }
 
 static void emit_print(FILE *o, const Expr *val, int ind) {
@@ -588,10 +696,12 @@ static void emit_print(FILE *o, const Expr *val, int ind) {
     fputs(");\n", o);
 }
 
+static const char *local_qualifier(void) {
+    return g_volatile ? " volatile" : "";
+}
+
 static void emit_local_decl(FILE *o, const Stmt *s, int ind) {
     const DeclType *dt = &s->as.decl.dtype;
-    if (g_gc_strings && (dt->kind != DT_SCALAR && dt->kind != DT_INFER))
-        cg_fail("--gc-strings only supports scalar declarations");
     if (g_gc_strings && s->as.decl.is_global)
         cg_fail("--gc-strings: global declarations must be at the top level");
     if (dt->kind == DT_ARRAY) {
@@ -602,9 +712,10 @@ static void emit_local_decl(FILE *o, const Stmt *s, int ind) {
         VType vt; vt.ck = CK_ARRAY; vt.elem = el; vt.key = WT_UNKNOWN;
         sym_add(g_loc, &g_nloc, s->as.decl.name, vt);
         indent(o, ind);
-        fprintf(o, "%s %s[", ctype(el), s->as.decl.name);
+        fprintf(o, "%s%s %s[", ctype(el), local_qualifier(), s->as.decl.name);
         emit_expr(o, dt->array_size);
         fputs("] = {0};\n", o);
+        emit_gc_collection_root(o, s->as.decl.name, vt, ind);
         return;
     }
     if (dt->kind == DT_LIST) {
@@ -615,18 +726,11 @@ static void emit_local_decl(FILE *o, const Stmt *s, int ind) {
         VType vt; vt.ck = CK_LIST; vt.elem = el; vt.key = WT_UNKNOWN;
         sym_add(g_loc, &g_nloc, s->as.decl.name, vt);
         indent(o, ind);
-        fprintf(o, "_wl *%s = _wl_new(sizeof(%s));\n", s->as.decl.name, ctype(el));
-        if (s->as.decl.init) {
-            if (s->as.decl.init->kind != EX_LIST)
-                cg_fail("list '%s' initializer expects a [..] literal", s->as.decl.name);
-            const Expr *lst = s->as.decl.init;
-            for (int i = 0; i < lst->as.list.n; i++) {
-                indent(o, ind);
-                fprintf(o, "_wl_push_%s(%s, ", list_suffix(el), s->as.decl.name);
-                emit_expr(o, lst->as.list.items[i]);
-                fputs(");\n", o);
-            }
-        }
+        fprintf(o, "_wl *%s %s = _wl_new(sizeof(%s)", local_qualifier(), s->as.decl.name, ctype(el));
+        if (g_gc_strings) fprintf(o, ", %d", el == WT_STR);
+        fputs(");\n", o);
+        emit_gc_collection_root(o, s->as.decl.name, vt, ind);
+        emit_list_items(o, s, el, ind);
         return;
     }
     if (dt->kind == DT_DICT) {
@@ -638,20 +742,11 @@ static void emit_local_decl(FILE *o, const Stmt *s, int ind) {
         VType v; v.ck = CK_DICT; v.elem = vt; v.key = kt;
         sym_add(g_loc, &g_nloc, s->as.decl.name, v);
         indent(o, ind);
-        fprintf(o, "_wd *%s = _wd_new(%d);\n", s->as.decl.name, kt == WT_STR ? 1 : 0);
-        if (s->as.decl.init) {
-            if (s->as.decl.init->kind != EX_DICT)
-                cg_fail("dict '%s' initializer expects a [key: value, ...] literal", s->as.decl.name);
-            const Expr *d = s->as.decl.init;
-            for (int i = 0; i < d->as.dict.n; i++) {
-                indent(o, ind);
-                fprintf(o, "_wd_set(%s, ", s->as.decl.name);
-                emit_dict_pack(o, kt, d->as.dict.keys[i], 1);
-                fputs(", ", o);
-                emit_dict_pack(o, vt, d->as.dict.vals[i], 1);
-                fputs(");\n", o);
-            }
-        }
+        fprintf(o, "_wd *%s %s = _wd_new(%d", local_qualifier(), s->as.decl.name, kt == WT_STR);
+        if (g_gc_strings) fprintf(o, ", %d", vt == WT_STR);
+        fputs(");\n", o);
+        emit_gc_collection_root(o, s->as.decl.name, v, ind);
+        emit_dict_items(o, s, kt, vt, ind);
         return;
     }
     WType t;
@@ -681,12 +776,13 @@ static void emit_local_decl(FILE *o, const Stmt *s, int ind) {
             fputs(";\n", o);
         }
         indent(o, ind);
-        fprintf(o, "%s %s = ", ctype(t), s->as.decl.name);
+        fprintf(o, "%s%s %s = ", ctype(t), local_qualifier(), s->as.decl.name);
         if (s->as.decl.init) fprintf(o, "_wind_init_%d", temporary);
         else fputs(t == WT_STR ? "\"\"" : "0", o);
         fputs(";\n", o);
         sym_add(g_loc, &g_nloc, s->as.decl.name, vt_scalar(t));
         if (t == WT_STR) emit_gc_root(o, s->as.decl.name, ind);
+        if (t == WT_JSON) emit_gc_json_root(o, s->as.decl.name, ind);
         return;
     }
     sym_add(g_loc, &g_nloc, s->as.decl.name, vt_scalar(t));
@@ -704,10 +800,32 @@ static const char *assignop_c(TokenKind op) {
     }
 }
 
+static void emit_loop_collection(FILE *o, const Expr *coll, int id) {
+    if (g_gc_strings) fprintf(o, "_wind_iter_%d", id);
+    else emit_expr(o, coll);
+}
+
+static void emit_wgc_try(FILE *o, const Stmt *s, int ind) {
+    int saved_locals = g_nloc;
+    indent(o, ind); fputs("{\n", o);
+    indent(o, ind + 1); fputs("_wt_frame _wt_local __attribute__((cleanup(_wt_leave))) = _wt_enter();\n", o);
+    indent(o, ind + 1); fputs("if (setjmp(_wt_jb[_wt_local.index]) == 0) {\n", o);
+    emit_block(o, &s->as.tryc.body, ind + 2);
+    indent(o, ind + 1); fputs("} else {\n", o);
+    if (s->as.tryc.catch_var) {
+        const char *name = s->as.tryc.catch_var;
+        sym_add(g_loc, &g_nloc, name, vt_scalar(WT_STR));
+        indent(o, ind + 2); fprintf(o, "char *volatile %s = _wt_msg;\n", name);
+        emit_gc_root(o, name, ind + 2);
+    }
+    indent(o, ind + 2); fputs("_wt_msg = \"\";\n", o);
+    emit_block(o, &s->as.tryc.catch_b, ind + 2);
+    g_nloc = saved_locals;
+    indent(o, ind + 1); fputs("}\n", o);
+    indent(o, ind); fputs("}\n", o);
+}
+
 static void emit_stmt(FILE *o, const Stmt *s, int ind) {
-    if (g_gc_strings && (s->kind == ST_TRY || s->kind == ST_THROW ||
-                        s->kind == ST_HTTP_SERVE || s->kind == ST_LOOP))
-        cg_fail("--gc-strings does not support exceptions, http.serve or collection loops yet");
     switch (s->kind) {
         case ST_VAR_DECL:
             emit_local_decl(o, s, ind);
@@ -715,30 +833,46 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
         case ST_ASSIGN: {
             const Expr *tgt = s->as.assign.target;
             if (tgt->kind == EX_INDEX) {
-                if (g_gc_strings) cg_fail("--gc-strings does not support indexing yet");
                 VType cv = coll_vtype(tgt->as.index.coll);
                 if (cv.ck == CK_LIST) {
                     if (s->as.assign.op != TK_ASSIGN)
                         cg_fail("list: only '=' is supported for elements (not +=)");
                     indent(o, ind);
+                    emit_gc_expr_start(o);
                     fprintf(o, "_wl_set_%s(", list_suffix(cv.elem));
                     emit_expr(o, tgt->as.index.coll); fputs(", ", o);
                     emit_expr(o, tgt->as.index.idx);  fputs(", ", o);
-                    emit_expr(o, s->as.assign.value); fputs(");\n", o);
+                    emit_expr(o, s->as.assign.value); fputc(')', o);
+                    emit_gc_expr_end(o); fputs(";\n", o);
                     break;
                 }
                 if (cv.ck == CK_DICT) {
                     if (s->as.assign.op != TK_ASSIGN)
                         cg_fail("dict: only '=' is supported for elements (not +=)");
                     indent(o, ind);
+                    emit_gc_expr_start(o);
                     fputs("_wd_set(", o);
                     emit_expr(o, tgt->as.index.coll); fputs(", ", o);
                     emit_dict_pack(o, cv.key, tgt->as.index.idx, 1);
                     fputs(", ", o);
                     emit_dict_pack(o, cv.elem, s->as.assign.value, 1);
-                    fputs(");\n", o);
+                    fputc(')', o);
+                    emit_gc_expr_end(o); fputs(";\n", o);
                     break;
                 }
+                if (g_gc_strings && cv.ck == CK_ARRAY) {
+                    indent(o, ind);
+                    int protect = needs_temps(tgt) || needs_temps(s->as.assign.value);
+                    if (protect) emit_gc_expr_start(o);
+                    emit_expr(o, tgt->as.index.coll); fputc('[', o);
+                    emit_expr(o, tgt->as.index.idx); fputc(']', o);
+                    fprintf(o, " %s ", assignop_c(s->as.assign.op));
+                    emit_expr(o, s->as.assign.value);
+                    if (protect) emit_gc_expr_end(o);
+                    fputs(";\n", o);
+                    break;
+                }
+                if (g_gc_strings) cg_fail("--gc-strings only supports indexed writes to collections");
             }
             if (tgt->kind != EX_IDENT && tgt->kind != EX_TYPED && tgt->kind != EX_INDEX)
                 cg_fail("assignment supported to a variable or element a[i]");
@@ -769,6 +903,7 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
         case ST_WHILE:
             indent(o, ind); fputs("while (", o);
             emit_full_expr(o, s->as.whilel.cond); fputs(") {\n", o);
+            if (g_gc_strings && needs_temps(s->as.whilel.cond)) emit_gc_checkpoint(o, ind + 1);
             emit_block(o, &s->as.whilel.body, ind + 1);
             indent(o, ind); fputs("}\n", o);
             break;
@@ -778,6 +913,7 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
             fprintf(o, "for (int __rep%d = 0; __rep%d < (", id, id);
             emit_full_expr(o, s->as.repeatl.count);
             fprintf(o, "); __rep%d++) {\n", id);
+            if (g_gc_strings && needs_temps(s->as.repeatl.count)) emit_gc_checkpoint(o, ind + 1);
             emit_block(o, &s->as.repeatl.body, ind + 1);
             indent(o, ind); fputs("}\n", o);
             break;
@@ -792,7 +928,7 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
                 emit_full_expr(o, s->as.forr.from);
                 fputs(";\n", o);
                 indent(o, ind);
-                fprintf(o, "for (int %s = (_wind_init_%d", v, temporary);
+                fprintf(o, "for (int%s %s = (_wind_init_%d", local_qualifier(), v, temporary);
                 sym_add(g_loc, &g_nloc, v, vt_scalar(WT_INT));
             } else {
                 fprintf(o, "for (int %s = (", v);
@@ -802,18 +938,29 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
             emit_full_expr(o, s->as.forr.to);
             fprintf(o, "); %s++) {\n", v);
             if (!g_gc_strings) sym_add(g_loc, &g_nloc, v, vt_scalar(WT_INT));
+            if (g_gc_strings && needs_temps(s->as.forr.to)) emit_gc_checkpoint(o, ind + 1);
             emit_block(o, &s->as.forr.body, ind + 1);
             if (g_gc_strings) g_nloc = before_loop;
             indent(o, ind); fputs("}\n", o);
             break;
         }
         case ST_RETURN:
-            if (g_gc_strings && g_in_main) cg_fail("--gc-strings: return is only allowed in a function");
+            if (g_gc_strings && g_in_main) {
+                indent(o, ind); fputs("{ int _wind_status = ", o);
+                if (s->as.ret.value) emit_full_expr(o, s->as.ret.value);
+                else fputc('0', o);
+                fputs("; wind_str_destroy(); return _wind_status; }\n", o);
+                break;
+            }
             indent(o, ind); fputs("return", o);
             if (s->as.ret.value) { fputc(' ', o); emit_full_expr(o, s->as.ret.value); }
             fputs(";\n", o);
             break;
         case ST_TRY: {
+            if (g_gc_strings) {
+                emit_wgc_try(o, s, ind);
+                break;
+            }
             indent(o, ind); fputs("{\n", o);
             indent(o, ind + 1);
             fputs("if (_wt_depth >= 32) { fprintf(stderr, \"try: too deep\\n\"); exit(1); }\n", o);
@@ -835,7 +982,7 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
         }
         case ST_THROW:
             indent(o, ind); fputs("_wt_throw(", o);
-            emit_expr(o, s->as.throwc.value);
+            emit_full_expr(o, s->as.throwc.value);
             fputs(");\n", o);
             break;
         case ST_BREAK:    indent(o, ind); fputs("break;\n", o); break;
@@ -852,36 +999,53 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
         case ST_LOOP: {                              /* loop v in <список|словарь> ... end */
             VType cv = coll_vtype(s->as.loopl.coll);
             int id = g_rep_id++;
+            int before_loop = g_nloc;
+            if (g_gc_strings && (cv.ck == CK_LIST || cv.ck == CK_DICT)) {
+                char name[40];
+                snprintf(name, sizeof name, "_wind_iter_%d", id);
+                indent(o, ind); fputs("{\n", o);
+                indent(o, ++ind);
+                fprintf(o, "%s *%s = ", cv.ck == CK_LIST ? "_wl" : "_wd", name);
+                emit_full_expr(o, s->as.loopl.coll); fputs(";\n", o);
+                emit_gc_collection_root(o, name, cv, ind);
+            }
             if (cv.ck == CK_LIST) {
                 indent(o, ind);
                 fprintf(o, "for (int __it%d = 0; __it%d < _wl_len(", id, id);
-                emit_expr(o, s->as.loopl.coll);
+                emit_loop_collection(o, s->as.loopl.coll, id);
                 fprintf(o, "); __it%d++) {\n", id);
                 indent(o, ind + 1);
-                fprintf(o, "%s %s = _wl_get_%s(", ctype(cv.elem), s->as.loopl.var, list_suffix(cv.elem));
-                emit_expr(o, s->as.loopl.coll);
+                fprintf(o, "%s%s %s = _wl_get_%s(", ctype(cv.elem), local_qualifier(),
+                        s->as.loopl.var, list_suffix(cv.elem));
+                emit_loop_collection(o, s->as.loopl.coll, id);
                 fprintf(o, ", __it%d);\n", id);
                 sym_add(g_loc, &g_nloc, s->as.loopl.var, vt_scalar(cv.elem));
+                if (g_gc_strings && cv.elem == WT_STR) emit_gc_root(o, s->as.loopl.var, ind + 1);
                 emit_block(o, &s->as.loopl.body, ind + 1);
                 indent(o, ind); fputs("}\n", o);
             } else if (cv.ck == CK_DICT) {
                 indent(o, ind);
                 fprintf(o, "for (int __b%d = 0; __b%d < (", id, id);
-                emit_expr(o, s->as.loopl.coll);
+                emit_loop_collection(o, s->as.loopl.coll, id);
                 fprintf(o, ")->nb; __b%d++)\n", id);
                 indent(o, ind + 1);
                 fprintf(o, "for (_wde *__e%d = (", id);
-                emit_expr(o, s->as.loopl.coll);
+                emit_loop_collection(o, s->as.loopl.coll, id);
                 fprintf(o, ")->b[__b%d]; __e%d; __e%d = __e%d->next) {\n", id, id, id, id);
                 indent(o, ind + 2);
-                fprintf(o, "%s %s = ", ctype(cv.key), s->as.loopl.var);
+                fprintf(o, "%s%s %s = ", ctype(cv.key), local_qualifier(), s->as.loopl.var);
                 emit_unpack_open(o, cv.key);
                 fprintf(o, "__e%d->key);\n", id);
                 sym_add(g_loc, &g_nloc, s->as.loopl.var, vt_scalar(cv.key));
+                if (g_gc_strings && cv.key == WT_STR) emit_gc_root(o, s->as.loopl.var, ind + 2);
                 emit_block(o, &s->as.loopl.body, ind + 2);
                 indent(o, ind + 1); fputs("}\n", o);
             } else {
                 cg_fail("loop..in is supported over lists and dicts");
+            }
+            if (g_gc_strings) {
+                g_nloc = before_loop;
+                indent(o, ind - 1); fputs("}\n", o);
             }
             break;
         }
@@ -893,7 +1057,7 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
         case ST_HTTP_SERVE: {
             indent(o, ind);   fputs("{\n", o);
             indent(o, ind+1); fputs("int _wh_sfd = _wh_listen((int)(", o);
-            emit_expr(o, s->as.serve.port); fputs("));\n", o);
+            emit_full_expr(o, s->as.serve.port); fputs("));\n", o);
             indent(o, ind+1); fputs("char _wh_path[2048];\n", o);
             indent(o, ind+1); fputs("for(;;){\n", o);
             indent(o, ind+2); fputs("int _wh_cfd = _wh_accept(_wh_sfd, _wh_path, sizeof _wh_path);\n", o);
@@ -905,13 +1069,14 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
                     cg_fail("http.serve: route handler must produce a str");
                 indent(o, ind+2);
                 fprintf(o, "%sif(strcmp(_wh_path, ", i ? "else " : "");
-                emit_expr(o, rt->path); fputs(")==0) _wh_body = ", o);
-                emit_expr(o, rt->handler); fputs(";\n", o);
+                emit_full_expr(o, rt->path); fputs(")==0) _wh_body = ", o);
+                emit_full_expr(o, rt->handler); fputs(";\n", o);
             }
             indent(o, ind+2);
             fputs(s->as.serve.nroutes ? "else _wh_body = \"404 Not Found\";\n"
                                       : "_wh_body = \"404 Not Found\";\n", o);
             indent(o, ind+2); fputs("_wh_respond(_wh_cfd, _wh_body);\n", o);
+            emit_gc_checkpoint(o, ind + 2);
             indent(o, ind+1); fputs("}\n", o);
             indent(o, ind);   fputs("}\n", o);
             break;
@@ -921,18 +1086,56 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
     }
 }
 
+static int stmt_needs_checkpoint(const Stmt *s) {
+    switch (s->kind) {
+        case ST_VAR_DECL:
+            return s->as.decl.dtype.kind == DT_LIST || s->as.decl.dtype.kind == DT_DICT ||
+                   (s->as.decl.init && needs_temps(s->as.decl.init));
+        case ST_ASSIGN:
+            return needs_temps(s->as.assign.target) || needs_temps(s->as.assign.value);
+        case ST_OUTPUT: return needs_temps(s->as.output.value);
+        case ST_EXPR: return needs_temps(s->as.expr.expr);
+        case ST_IF:
+            for (int i = 0; i < s->as.iff.nclauses; i++)
+                if (needs_temps(s->as.iff.clauses[i].cond)) return 1;
+            return 0;
+        case ST_WHILE: return needs_temps(s->as.whilel.cond);
+        case ST_REPEAT: return needs_temps(s->as.repeatl.count);
+        case ST_FOR: return needs_temps(s->as.forr.from) || needs_temps(s->as.forr.to);
+        default: return 0;
+    }
+}
+
 static void emit_stmt_at_checkpoint(FILE *o, const Stmt *s, int ind) {
+    int checkpoint = g_gc_strings && stmt_needs_checkpoint(s);
     emit_stmt(o, s, ind);
-    if (s->kind != ST_RETURN && s->kind != ST_BREAK && s->kind != ST_CONTINUE)
-        emit_gc_checkpoint(o, ind);
+    if (checkpoint) emit_gc_checkpoint(o, ind);
 }
 
 static void emit_block(FILE *o, const Block *b, int ind) {
     int before_block = g_nloc;
-    /* Освобождаем временные значения условия даже у пустого тела цикла. */
-    emit_gc_checkpoint(o, ind);
     for (int i = 0; i < b->n; i++) emit_stmt_at_checkpoint(o, b->items[i], ind);
     if (g_gc_strings) g_nloc = before_block;
+}
+
+static int block_has_try(const Block *block) {
+    for (int i = 0; i < block->n; i++) {
+        const Stmt *s = block->items[i];
+        switch (s->kind) {
+            case ST_TRY: return 1;
+            case ST_IF:
+                for (int j = 0; j < s->as.iff.nclauses; j++)
+                    if (block_has_try(&s->as.iff.clauses[j].body)) return 1;
+                if (s->as.iff.has_else && block_has_try(&s->as.iff.else_b)) return 1;
+                break;
+            case ST_WHILE: if (block_has_try(&s->as.whilel.body)) return 1; break;
+            case ST_REPEAT: if (block_has_try(&s->as.repeatl.body)) return 1; break;
+            case ST_FOR: if (block_has_try(&s->as.forr.body)) return 1; break;
+            case ST_LOOP: if (block_has_try(&s->as.loopl.body)) return 1; break;
+            default: break;
+        }
+    }
+    return 0;
 }
 
 static void emit_func_signature(FILE *o, const Stmt *s) {
@@ -941,12 +1144,14 @@ static void emit_func_signature(FILE *o, const Stmt *s) {
     if (s->as.func.nparams == 0) fputs("void", o);
     for (int i = 0; i < s->as.func.nparams; i++) {
         if (i) fputs(", ", o);
-        fprintf(o, "%s %s", ctype(wt_base(s->as.func.params[i].type)), s->as.func.params[i].name);
+        fprintf(o, "%s%s %s", ctype(wt_base(s->as.func.params[i].type)), local_qualifier(),
+                s->as.func.params[i].name);
     }
     fputc(')', o);
 }
 
 static void emit_func(FILE *o, const Stmt *s) {
+    g_volatile = g_gc_strings && block_has_try(&s->as.func.body);
     emit_func_signature(o, s);
     fputs(" {\n", o);
     g_nloc = 0;
@@ -958,16 +1163,19 @@ static void emit_func(FILE *o, const Stmt *s) {
     }
     emit_block(o, &s->as.func.body, 1);
     fputs("}\n\n", o);
+    g_volatile = 0;
 }
 
 int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_strings) {
     cg_err = errbuf; cg_errcap = errcap;
     g_nglob = g_nloc = g_nfunc = g_rep_id = 0;
     g_gc_strings = gc_strings;
-    g_in_main = g_gc_id = 0;
+    g_in_main = g_gc_id = g_volatile = g_sqlite3 = 0;
 
     if (setjmp(cg_jb)) return 0;
-    if (g_gc_strings && p->nlinks) cg_fail("--gc-strings does not support link directives yet");
+    for (int i = 0; i < p->nlinks; i++)
+        if (!strcmp(p->links[i], "\"sqlite3\"") || !strcmp(p->links[i], "sqlite3"))
+            g_sqlite3 = 1;
 
     /* пасс 1: сигнатуры функций + типы глобалов (чтобы вызовы/ссылки типизировались) */
     for (int i = 0; i < p->body.n; i++) {
@@ -979,8 +1187,13 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_s
             g_nfunc++;
         } else if (s->kind == ST_VAR_DECL && s->as.decl.is_global) {
             const DeclType *dt = &s->as.decl.dtype;
-            if (g_gc_strings && dt->kind != DT_SCALAR && dt->kind != DT_INFER)
-                cg_fail("--gc-strings only supports scalar declarations");
+            if (g_gc_strings && (dt->kind == DT_LIST || dt->kind == DT_DICT)) {
+                VType coll = dt->kind == DT_LIST
+                    ? (VType){CK_LIST, wt_base(dt->base), WT_UNKNOWN}
+                    : (VType){CK_DICT, wt_base(dt->val), wt_base(dt->key)};
+                sym_add(g_glob, &g_nglob, s->as.decl.name, coll);
+                continue;
+            }
             VType vt;
             if (dt->kind == DT_ARRAY) {
                 WType el = wt_base(dt->base);
@@ -998,13 +1211,39 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_s
     /* преамбула */
     fputs("/* Generated by Wind AST codegen */\n", out);
     fputs("#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdarg.h>\n#include <stdint.h>\n#include <time.h>\n#include <math.h>\n\n", out);
+    if (g_sqlite3) fputs("#include <sqlite3.h>\n", out);
 
     if (g_gc_strings) {
-        fputs("#include \"strings_gc.h\"\n\n", out);
+        fputs("#include \"strings_gc.h\"\n#include \"collections_gc.h\"\n"
+              "#define WIND_GROW(p,used,n) wind_str_grow((p),(used),(n))\n"
+              "#include <setjmp.h>\n"
+              "typedef struct {int index;} _wt_frame;\n"
+              "static jmp_buf _wt_jb[32];\n"
+              "static WindStrState _wt_state[32];\n"
+              "static int _wt_depth;\n"
+              "static char *_wt_msg = \"\";\n"
+              "__attribute__((unused)) static _wt_frame _wt_enter(void) {\n"
+              "    if (_wt_depth >= 32) { fputs(\"try: too deep\\n\", stderr); exit(1); }\n"
+              "    _wt_state[_wt_depth] = wind_str_snapshot();\n"
+              "    return (_wt_frame){_wt_depth++};\n"
+              "}\n"
+              "__attribute__((unused)) static void _wt_leave(_wt_frame *frame) {\n"
+              "    if (_wt_depth == frame->index + 1) --_wt_depth;\n"
+              "}\n"
+              "__attribute__((unused,noreturn)) static void _wt_throw(char *msg) {\n"
+              "    _wt_msg = msg ? msg : \"\";\n"
+              "    if (_wt_depth) {\n"
+              "        int index = --_wt_depth;\n"
+              "        wind_str_unwind(_wt_state[index]);\n"
+              "        longjmp(_wt_jb[index], 1);\n"
+              "    }\n"
+              "    fprintf(stderr, \"uncaught: %s\\n\", _wt_msg); exit(1);\n"
+              "}\n\n", out);
     } else {
     /* Boehm GC: весь malloc/calloc/realloc уходит под сборщик, free — пустышка */
     fputs("#include <gc.h>\n"
           "#define wind_str_alloc malloc\n"
+          "#define WIND_GROW(p,used,n) realloc((p),(n))\n"
           "#define malloc(n)    GC_MALLOC(n)\n"
           "#define calloc(n,m)  GC_MALLOC((size_t)(n)*(size_t)(m))\n"
           "#define realloc(p,n) GC_REALLOC((p),(n))\n"
@@ -1082,11 +1321,10 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_s
           "    struct timespec ts; ts.tv_sec=(time_t)s; ts.tv_nsec=(long)((s-(double)ts.tv_sec)*1e9);\n"
           "    nanosleep(&ts,NULL); }\n\n", out);
 
-    if (!g_gc_strings) {
     fputs("__attribute__((unused)) static char *_wf_read(const char *path){\n"
           "    FILE *f=fopen(path,\"rb\"); if(!f){ fprintf(stderr,\"file.read: cannot open %s\\n\",path); exit(1);} \n"
           "    fseek(f,0,SEEK_END); long sz=ftell(f); fseek(f,0,SEEK_SET); if(sz<0) sz=0;\n"
-          "    char *b=malloc((size_t)sz+1); size_t g=fread(b,1,(size_t)sz,f); b[g]=0; fclose(f); return b; }\n"
+          "    char *b=wind_str_alloc((size_t)sz+1); size_t g=fread(b,1,(size_t)sz,f); b[g]=0; fclose(f); return b; }\n"
           "__attribute__((unused)) static void _wf_write(const char *path,const char *t){\n"
           "    FILE *f=fopen(path,\"w\"); if(!f){ fprintf(stderr,\"file.write: cannot open %s\\n\",path); exit(1);} if(t) fputs(t,f); fclose(f); }\n"
           "__attribute__((unused)) static void _wf_append(const char *path,const char *t){\n"
@@ -1097,31 +1335,49 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_s
     /* JSON: \\u-эскейпы пока не декодируются. */
     fputs(
       "typedef enum { WJ_NUL,WJ_BOO,WJ_INT,WJ_FRC,WJ_STR,WJ_ARR,WJ_OBJ } _wjt;\n"
-      "typedef struct _wj { _wjt t; long i; double f; char *s; struct _wj **el; char **ky; int n; } _wj;\n"
+      "typedef struct _wj { _wjt t; long i; double f; char *s; struct _wj **el; char **ky; int n; } _wj;\n", out);
+    if (g_gc_strings) {
+        fputs("static void _wj_trace(const void *data, WindGcVisit visit, void *context) {\n"
+              "    const _wj *j = data;\n"
+              "    visit(context, j->s); visit(context, j->el); visit(context, j->ky);\n"
+              "    for (int i = 0; i < j->n; i++) {\n"
+              "        visit(context, j->el[i]);\n"
+              "        if (j->ky) visit(context, j->ky[i]);\n"
+              "    }\n"
+              "}\n"
+              "__attribute__((unused)) static void _wj_trace_slots(const volatile void *data, size_t n, WindGcVisit visit, void *context) {\n"
+              "    _wj *const volatile *slots = data;\n"
+              "    for (size_t i = 0; i < n; i++) visit(context, slots[i]);\n"
+              "}\n"
+              "#define WIND_JSON_NEW() wind_str_alloc_traced(sizeof(_wj), _wj_trace)\n", out);
+    } else {
+        fputs("#define WIND_JSON_NEW() malloc(sizeof(_wj))\n", out);
+    }
+    fputs(
       "static _wj *_wj_pv(const char **p);\n"
-      "__attribute__((unused)) static _wj *_wj_mk(_wjt t){ _wj *j=calloc(1,sizeof *j); j->t=t; return j; }\n"
+      "__attribute__((unused)) static _wj *_wj_mk(_wjt t){ _wj *j=WIND_JSON_NEW(); *j=(_wj){.t=t}; return j; }\n"
       "__attribute__((unused)) static void _wj_ws(const char **p){ while(**p==' '||**p=='\\t'||**p=='\\n'||**p=='\\r') (*p)++; }\n"
       "__attribute__((unused)) static char *_wj_pstr(const char **p){\n"
-      "    (*p)++; size_t cap=16,n=0; char *b=malloc(cap);\n"
+      "    (*p)++; size_t cap=16,n=0; char *b=wind_str_alloc(cap);\n"
       "    while(**p && **p!='\"'){ char c=**p;\n"
       "        if(c=='\\\\'){ (*p)++; char e=**p; switch(e){ case 'n':c='\\n';break; case 't':c='\\t';break; case 'r':c='\\r';break; default:c=e; } }\n"
-      "        if(n+1>=cap){ cap*=2; b=realloc(b,cap); }\n"
+      "        if(n+1>=cap){ cap*=2; b=WIND_GROW(b,n,cap); }\n"
       "        b[n++]=c; (*p)++; }\n"
       "    if(**p=='\"') (*p)++;\n"
       "    b[n]=0; return b; }\n"
       "__attribute__((unused)) static _wj *_wj_pv(const char **p){ _wj_ws(p); char c=**p;\n"
       "    if(c=='\"'){ _wj *j=_wj_mk(WJ_STR); j->s=_wj_pstr(p); return j; }\n"
       "    if(c=='{'){ (*p)++; _wj *j=_wj_mk(WJ_OBJ); _wj_ws(p); if(**p=='}'){ (*p)++; return j; }\n"
-      "        int cap=4; j->ky=malloc((size_t)cap*sizeof(char*)); j->el=malloc((size_t)cap*sizeof(_wj*));\n"
+      "        int cap=4; j->ky=wind_str_alloc((size_t)cap*sizeof(char*)); j->el=wind_str_alloc((size_t)cap*sizeof(_wj*));\n"
       "        for(;;){ _wj_ws(p); char *k=_wj_pstr(p); _wj_ws(p); if(**p==':')(*p)++; _wj *v=_wj_pv(p);\n"
-      "            if(j->n>=cap){ cap*=2; j->ky=realloc(j->ky,(size_t)cap*sizeof(char*)); j->el=realloc(j->el,(size_t)cap*sizeof(_wj*)); }\n"
+      "            if(j->n>=cap){ cap*=2; j->ky=WIND_GROW(j->ky,(size_t)j->n*sizeof(char*),(size_t)cap*sizeof(char*)); j->el=WIND_GROW(j->el,(size_t)j->n*sizeof(_wj*),(size_t)cap*sizeof(_wj*)); }\n"
       "            j->ky[j->n]=k; j->el[j->n]=v; j->n++; _wj_ws(p);\n"
       "            if(**p==','){ (*p)++; continue; } if(**p=='}') (*p)++; break; }\n"
       "        return j; }\n"
       "    if(c=='['){ (*p)++; _wj *j=_wj_mk(WJ_ARR); _wj_ws(p); if(**p==']'){ (*p)++; return j; }\n"
-      "        int cap=4; j->el=malloc((size_t)cap*sizeof(_wj*));\n"
+      "        int cap=4; j->el=wind_str_alloc((size_t)cap*sizeof(_wj*));\n"
       "        for(;;){ _wj *v=_wj_pv(p);\n"
-      "            if(j->n>=cap){ cap*=2; j->el=realloc(j->el,(size_t)cap*sizeof(_wj*)); }\n"
+      "            if(j->n>=cap){ cap*=2; j->el=WIND_GROW(j->el,(size_t)j->n*sizeof(_wj*),(size_t)cap*sizeof(_wj*)); }\n"
       "            j->el[j->n++]=v; _wj_ws(p);\n"
       "            if(**p==','){ (*p)++; continue; } if(**p==']') (*p)++; break; }\n"
       "        return j; }\n"
@@ -1145,7 +1401,7 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_s
       "__attribute__((unused)) static char *_wj_type(_wj *j){ static const char *nm[]={\"null\",\"bool\",\"int\",\"frac\",\"str\",\"array\",\"object\"}; return (char*)(j?nm[j->t]:\"null\"); }\n", out);
     fputs(
       "typedef struct { char *p; size_t n,cap; } _wjb;\n"
-      "__attribute__((unused)) static void _wjb_ch(_wjb *b,char c){ if(b->n+1>=b->cap){ b->cap=b->cap?b->cap*2:32; b->p=realloc(b->p,b->cap); } b->p[b->n++]=c; }\n"
+      "__attribute__((unused)) static void _wjb_ch(_wjb *b,char c){ if(b->n+1>=b->cap){ b->cap=b->cap?b->cap*2:32; b->p=WIND_GROW(b->p,b->n,b->cap); } b->p[b->n++]=c; }\n"
       "__attribute__((unused)) static void _wjb_s(_wjb *b,const char *s){ while(*s) _wjb_ch(b,*s++); }\n"
       "__attribute__((unused)) static void _wjb_q(_wjb *b,const char *s){ _wjb_ch(b,'\"'); for(;*s;s++){ unsigned char c=(unsigned char)*s; switch(c){ case '\"': _wjb_s(b,\"\\\\\\\"\"); break; case '\\\\': _wjb_s(b,\"\\\\\\\\\"); break; case '\\n': _wjb_s(b,\"\\\\n\"); break; case '\\t': _wjb_s(b,\"\\\\t\"); break; case '\\r': _wjb_s(b,\"\\\\r\"); break; default: _wjb_ch(b,(char)c); } } _wjb_ch(b,'\"'); }\n"
       "__attribute__((unused)) static void _wj_enc(_wjb *b,_wj *j){ char t[64]; if(!j){ _wjb_s(b,\"null\"); return; }\n"
@@ -1228,8 +1484,6 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_s
       "    if(write(cfd,hdr,(size_t)hn)>=0){ size_t bl=strlen(body),off=0; while(off<bl){ ssize_t ww=write(cfd,body+off,bl-off); if(ww<=0) break; off+=(size_t)ww; } }\n"
       "    close(cfd); }\n\n", out);
 
-    }
-
     for (int i = 0; i < p->body.n; i++)
         if (p->body.items[i]->kind == ST_FUNC) {
             emit_func_signature(out, p->body.items[i]); fputs(";\n", out);
@@ -1245,6 +1499,8 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_s
             fprintf(out, "%s %s[", ctype(wt_base(dt->base)), s->as.decl.name);
             emit_expr(out, dt->array_size);
             fputs("];\n", out);
+        } else if (g_gc_strings && (dt->kind == DT_LIST || dt->kind == DT_DICT)) {
+            fprintf(out, "%s *%s;\n", dt->kind == DT_LIST ? "_wl" : "_wd", s->as.decl.name);
         } else {
             WType t = (dt->kind == DT_INFER) ? infer(s->as.decl.init) : wt_base(dt->base);
             fprintf(out, "%s %s%s;\n", ctype(t), s->as.decl.name,
@@ -1261,12 +1517,34 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_s
     if (!g_gc_strings) fputs("    GC_INIT();\n", out);
     g_nloc = 0;
     g_in_main = 1;
-    if (g_gc_strings)
-        for (int i = 0; i < g_nglob; i++)
-            if (g_glob[i].vt.elem == WT_STR) emit_gc_root(out, g_glob[i].name, 1);
+    g_volatile = g_gc_strings && block_has_try(&p->body);
+    if (g_gc_strings) {
+        emit_gc_root(out, "_wt_msg", 1);
+        for (int i = 0; i < g_nglob; i++) {
+            VType type = g_glob[i].vt;
+            if (type.ck == CK_SCALAR && type.elem == WT_STR)
+                emit_gc_root(out, g_glob[i].name, 1);
+            else if (type.ck == CK_SCALAR && type.elem == WT_JSON)
+                emit_gc_json_root(out, g_glob[i].name, 1);
+            else
+                emit_gc_collection_root(out, g_glob[i].name, type, 1);
+        }
+    }
     for (int i = 0; i < p->body.n; i++) {
         Stmt *s = p->body.items[i];
-        if (s->kind == ST_VAR_DECL && s->as.decl.is_global && s->as.decl.init) {
+        if (s->kind != ST_VAR_DECL || !s->as.decl.is_global) continue;
+        const DeclType *dt = &s->as.decl.dtype;
+        if (g_gc_strings && dt->kind == DT_LIST) {
+            WType el = wt_base(dt->base);
+            fprintf(out, "    %s = _wl_new(sizeof(%s), %d);\n", s->as.decl.name, ctype(el), el == WT_STR);
+            emit_list_items(out, s, el, 1);
+            emit_gc_checkpoint(out, 1);
+        } else if (g_gc_strings && dt->kind == DT_DICT) {
+            WType key = wt_base(dt->key), value = wt_base(dt->val);
+            fprintf(out, "    %s = _wd_new(%d, %d);\n", s->as.decl.name, key == WT_STR, value == WT_STR);
+            emit_dict_items(out, s, key, value, 1);
+            emit_gc_checkpoint(out, 1);
+        } else if (s->as.decl.init) {
             indent(out, 1);
             fprintf(out, "%s = ", s->as.decl.name);
             emit_full_expr(out, s->as.decl.init);

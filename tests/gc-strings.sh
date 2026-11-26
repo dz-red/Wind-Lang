@@ -69,7 +69,7 @@ if readelf -d app | grep -Fq 'libgc.so'; then
     exit 1
 fi
 
-# Count live managed blocks to distinguish collection in loops from cleanup at exit.
+# Ограничение проверяет сборку внутри циклов, а не только при выходе.
 cat > wrap.c <<'EOF'
 #include <assert.h>
 #include "gc.h"
@@ -86,7 +86,7 @@ __attribute__((destructor)) static void check_collection(void) {
 void *__wrap_wind_gc_alloc(WindGc *gc, size_t size) {
     void *data = __real_wind_gc_alloc(gc, size);
     if (data) ++live;
-    assert(live < 64); /* Each spin creates 500 strings. */
+    assert(live < 64);
     return data;
 }
 
@@ -100,6 +100,7 @@ size_t __wrap_wind_gc_collect_with(WindGc *gc, const void *roots, WindGcTrace tr
 EOF
 gcc -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -no-pie \
     -I "$runtime" output_ast.c "$runtime/gc.c" "$runtime/strings_gc.c" wrap.c \
+    "$runtime/collections_gc.c" \
     -Wl,--wrap=wind_gc_alloc,--wrap=wind_gc_collect_with -o app-sanitized
 test "$(ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 ./app-sanitized)" = "$expected"
 
@@ -113,7 +114,5 @@ reject() {
     grep -F "$2" error > /dev/null
 }
 
-reject 'str.list.values = []' 'only supports scalar declarations'
-reject 'var value = json.decode("null")' 'does not support the json module'
 reject 'str.value = getenv("HOME")' "unknown function 'getenv'"
 printf '%s\n' 'String GC: OK'

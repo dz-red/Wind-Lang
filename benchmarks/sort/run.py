@@ -44,7 +44,8 @@ def machine():
 
 def benchmark(tmp, node, rounds):
     src = ROOT / "src"
-    run("gcc", "-O2", "-Wall", f"-I{src}", *sorted(src.glob("*.c")), "-o", tmp / "wind")
+    run("gcc", "-O2", "-Wall", f"-I{src}", f'-DWIND_RUNTIME_DIR="{ROOT / "runtime"}"',
+        *sorted(src.glob("*.c")), "-o", tmp / "wind")
     run(tmp / "wind", HERE / "sort.wnd", cwd=tmp)
     run("gcc", "-O2", HERE / "sort.c", "-o", tmp / "sort-c")
     run("rustc", "-C", "opt-level=2", HERE / "sort.rs", "-o", tmp / "sort-rust")
