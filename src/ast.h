@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include "lexer.h"
+#include "errors.h"
 
 typedef enum {
     EX_INT,
@@ -89,6 +90,7 @@ typedef enum {
 struct Stmt {
     StmtKind kind;
     int line, col;
+    const WindSource *source;
     union {
         struct { int is_global; DeclType dtype; char *name; Expr *init; } decl;
         struct { Expr *target; TokenKind op; Expr *value; } assign;
@@ -97,8 +99,8 @@ struct Stmt {
         struct { Expr *count; Block body; } repeatl;
         struct { char *var; Expr *coll; Block body; } loopl;
         struct { char *var; Expr *from; Expr *to; Block body; } forr;
-        struct { char *name; Param *params; int nparams; TokenKind ret; Block body; } func;
-        struct { Expr *value; } ret;                 /* value может быть NULL */
+        struct { char *name; Param *params; int nparams; TokenKind ret; Block body; WindRange type_range; } func;
+        struct { Expr *value; WindRange range; } ret;
         struct { Block body; char *catch_var; Block catch_b; } tryc;
         struct { Expr *value; } throwc;
         struct { Expr *port; Route *routes; int nroutes; Block body; } serve;
@@ -111,6 +113,7 @@ typedef struct {
     char *module;
     char **names;
     int    nnames;
+    WindRange range;
 } Import;
 
 typedef struct { 

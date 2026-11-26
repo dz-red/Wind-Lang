@@ -47,7 +47,7 @@ printf 'http.serve 8080\n    on "/" -> "ok"\nend' > short.wnd
 cmp long.ast short.ast
 
 reject() {
-    if "$wind" --ast bad.wnd > /dev/null 2> error; then
+    if "$wind" --diag=compact --ast bad.wnd > /dev/null 2> error; then
         printf 'Unexpected success: %s\n' "$1" >&2
         exit 1
     fi
@@ -55,10 +55,10 @@ reject() {
 }
 
 printf 'if true\n    while false\n    end if\nend\n' > bad.wnd
-reject "bad.wnd:3:9: expected 'end' or 'end while'"
+reject "bad.wnd:3:9: error[W1002]: expected 'end' or 'end while'"
 printf 'if true\nend if extra\n' > bad.wnd
-reject "bad.wnd:2:8: expected end of line"
+reject "bad.wnd:2:8: error[W1002]: expected end of line"
 printf 'http.serve 8080\nend http.other\n' > bad.wnd
-reject "bad.wnd:2:10: expected 'serve'"
+reject "bad.wnd:2:10: error[W1002]: expected 'serve'"
 
 printf 'Block endings: OK\n'

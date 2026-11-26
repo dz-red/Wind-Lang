@@ -41,25 +41,6 @@ static void dir_of(const char *path, char *out, size_t cap) {
     else       out[0]   = '\0';
 }
 
-/* Читает файл целиком в malloc'нутый буфер с '\0' на конце. NULL если не открылся. */
-static char *read_whole_file(const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (sz < 0) { fclose(f); return NULL; }
-
-    char *buf = (char *)malloc((size_t)sz + 1);
-    if (!buf) { fclose(f); return NULL; }
-
-    size_t rd = fread(buf, 1, (size_t)sz, f);
-    buf[rd] = '\0';
-    fclose(f);
-    return buf;
-}
-
 static Stmt *find_func(const Program *p, const char *name) {
     for (int i = 0; i < p->body.n; i++) {
         Stmt *s = p->body.items[i];
@@ -77,83 +58,72 @@ static int name_listed(char **list, int n, const char *name) {
 
 
 
-static int load_one(Program *prog, const char *dir, const char *module,
-                    char *errbuf, int errcap);
+static int load_one(Program *prog, const char *dir, const Import *import,
+                    const WindSource *from, WindDiagnostics *diags);
 
 static int load_imports_of(Program *prog, const Program *src,
-                           const char *dir, char *errbuf, int errcap) {
+                           const char *dir, const WindSource *from, WindDiagnostics *diags) {
     for (int i = 0; i < src->nimports; i++) {
-        if (!load_one(prog, dir, src->imports[i].module, errbuf, errcap))
+        if (!load_one(prog, dir, &src->imports[i], from, diags))
             return 0;
     }
     return 1;
 }
 
-static int load_one(Program *prog, const char *dir, const char *module,
-                    char *errbuf, int errcap) {
+static int load_one(Program *prog, const char *dir, const Import *import,
+                    const WindSource *from, WindDiagnostics *diags) {
+    const char *module = import->module;
     if (already_loaded(module)) return 1;
     mark_loaded(module);                    /* метим ДО разбора: иначе a->b->a зациклится */
 
     char path[PATH_MAX_W];
     snprintf(path, sizeof path, "%s%s.wnd", dir, module);
 
-    char *src = read_whole_file(path);
+    char error[PATH_MAX_W + 128];
+    WindSource *src = wind_source_open(diags, path);
     if (!src) {
-        snprintf(errbuf, errcap, "module '%s' not found (looked for %s)", module, path);
-        return 0;
+        snprintf(error, sizeof error, "cannot read module '%.64s' (looked for %s)", module, path);
+        goto report;
     }
 
     int ntok = 0;
-    Token *toks = wind_lex(src, &ntok);
+    Token *toks = wind_lex(src->text, &ntok);
 
     Program sub;
-    char perr[256];
-    int eline = 0, ecol = 0;
-    if (!wind_parse(toks, ntok, &sub, perr, sizeof perr, &eline, &ecol)) {
-        snprintf(errbuf, errcap, "%s:%d:%d: %s", path, eline, ecol, perr);
-        wind_tokens_free(toks, ntok);
-        free(src);
-        return 0;
-    }
-
-    if (!load_imports_of(prog, &sub, dir, errbuf, errcap)) {
-        wind_tokens_free(toks, ntok);
-        free(src);
+    int ok = wind_parse(toks, ntok, &sub, diags, src);
+    wind_tokens_free(toks, ntok);
+    if (!ok || !load_imports_of(prog, &sub, dir, src, diags)) {
+        ast_free_program(&sub);
         return 0;
     }
 
     char *fnames[128];
     int   nfn   = 0;
-    int   taken = 0;
 
     for (int i = 0; i < sub.body.n; i++) {
         Stmt *s = sub.body.items[i];
         if (!s) continue;
 
-        if (s->kind != ST_FUNC) {
-            ast_free_stmt(s);
-            continue;
-        }
+        if (s->kind != ST_FUNC) continue;
 
         if (find_func(prog, s->as.func.name)) {
-            snprintf(errbuf, errcap,
+            snprintf(error, sizeof error,
                      "name conflict: '%s' from module '%s' is already defined",
                      s->as.func.name, module);
-            wind_tokens_free(toks, ntok);
-            free(src);
-            return 0;
+            ast_free_program(&sub);
+            goto report;
         }
 
         if (nfn < 128) fnames[nfn++] = s->as.func.name;
         block_push(&prog->body, s);    /* владение переходит к prog */
-        taken++;
+        sub.body.items[i] = NULL;
     }
-    free(sub.body.items);
 
-    for (int i = 0; i < sub.nlinks; i++) {
-        if (prog->nlinks < 32) prog->links[prog->nlinks++] = sub.links[i];
-        else                   free(sub.links[i]);
+    for (int i = 0; i < sub.nlinks && prog->nlinks < 32; i++) {
+        prog->links[prog->nlinks++] = sub.links[i];
+        sub.links[i] = NULL;
     }
+    ast_free_program(&sub);
 
     for (int i = 0; i < prog->nimports; i++) {
         Import *im = &prog->imports[i];
@@ -161,29 +131,29 @@ static int load_one(Program *prog, const char *dir, const char *module,
         if (strcmp(im->module, module) != 0) continue;
         for (int j = 0; j < im->nnames; j++) {
             if (!name_listed(fnames, nfn, im->names[j])) {
-                snprintf(errbuf, errcap,
+                snprintf(error, sizeof error,
                          "module '%s' has no function '%s'", module, im->names[j]);
-                wind_tokens_free(toks, ntok);
-                free(src);
-                return 0;
+                goto report;
             }
         }
     }
 
-    wind_tokens_free(toks, ntok);
-    free(src);
-    fprintf(stderr, "[wind] module '%s': %d function(s)\n", module, taken);
     return 1;
+
+report:
+    wind_diag_emit(diags, &(WindDiagnostic){
+        .code = WD_MODULE, .source = from, .primary = import->range, .message = error
+    });
+    return 0;
 }
 
-int wind_load_modules(Program *prog, const char *base_path,
-                      char *errbuf, int errcap) {
+int wind_load_modules(Program *prog, const WindSource *source, WindDiagnostics *diags) {
     char dir[PATH_MAX_W];
-    dir_of(base_path, dir, sizeof dir);
+    dir_of(source->path, dir, sizeof dir);
 
     forget_all();
 
-    int ok = load_imports_of(prog, prog, dir, errbuf, errcap);
+    int ok = load_imports_of(prog, prog, dir, source, diags);
 
     forget_all();
     return ok;

@@ -110,7 +110,7 @@ reject() {
         printf 'Unexpected success: %s\n' "$1" >&2
         exit 1
     fi
-    grep -F '[codegen error]' error > /dev/null
+    grep -F 'error[W2002]' error > /dev/null
     grep -F "$2" error > /dev/null
 }
 

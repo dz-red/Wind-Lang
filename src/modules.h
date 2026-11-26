@@ -4,7 +4,6 @@
 #include "ast.h"
 
 /* Модули ищутся рядом с base_path. Импортируются только функции и link. */
-int wind_load_modules(Program *prog, const char *base_path,
-                      char *errbuf, int errcap);
+int wind_load_modules(Program *prog, const WindSource *source, WindDiagnostics *diags);
 
 #endif /* WIND_MODULES_H */

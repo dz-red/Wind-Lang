@@ -191,6 +191,14 @@ void ast_free_block(Block *b) {
 void ast_free_program(Program *p) {
     if (!p) return;
     ast_free_block(&p->body);
+    for (int i = 0; i < p->nlinks; i++) free(p->links[i]);
+    for (int i = 0; i < p->nimports; i++) {
+        Import *im = &p->imports[i];
+        free(im->module);
+        for (int j = 0; j < im->nnames; j++) free(im->names[j]);
+        free(im->names);
+    }
+    p->nlinks = p->nimports = 0;
 }
 
 static void indent(FILE *o, int d) { for (int i = 0; i < d; i++) fputs("  ", o); }

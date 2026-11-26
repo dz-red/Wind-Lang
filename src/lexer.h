@@ -89,6 +89,8 @@ typedef struct {
     double fval;
     int line;          /* 1-based */
     int col;           /* 1-based, на старте токена */
+    int end_line, end_col;
+    const char *problem;
 } Token;
 
 /* out_count включает TK_EOF. Массив освобождает wind_tokens_free. */

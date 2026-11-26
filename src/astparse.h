@@ -4,6 +4,6 @@
 #include "ast.h"
 #include "lexer.h"
 int wind_parse(Token *toks, int count, Program *out,
-               char *errbuf, int errcap, int *out_line, int *out_col);
+               WindDiagnostics *diags, const WindSource *source);
 
 #endif /* WIND_ASTPARSE_H */

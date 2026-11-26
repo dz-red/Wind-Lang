@@ -92,6 +92,9 @@ static Token simple_tok(Lexer *l, TokenKind k, int start_line, int start_col) {
     t.fval = 0.0;
     t.line = start_line;
     t.col = start_col;
+    t.end_line = l->line;
+    t.end_col = l->col;
+    t.problem = NULL;
     return t;
 }
 
@@ -169,13 +172,13 @@ static Token lex_string(Lexer *l) {
     int end = l->pos;
     int len = end - start;
 
-    Token t = simple_tok(l, TK_STR_LIT, sl, sc);
     if (peek(l) != '"') {
-        t.kind = TK_BAD;
-        fprintf(stderr, "[lexer] %d:%d: unterminated string\n", sl, sc);
+        Token t = simple_tok(l, TK_BAD, sl, sc);
+        t.problem = "unterminated string";
         return t;
     }
     advance(l);
+    Token t = simple_tok(l, TK_STR_LIT, sl, sc);
 
     char *text = (char *)malloc((size_t)len + 1);
     if (!text) { perror("malloc"); exit(1); }
@@ -228,9 +231,15 @@ Token *wind_lex(const char *src, int *out_count) {
         }
         /* блочный комментарий C-стиля до ближайшей закрывающей пары (без вложенности) */
         if (peek(&l) == '/' && peek_at(&l, 1) == '*') {
+            int sl = l.line, sc = l.col;
             advance(&l); advance(&l);
             while (peek(&l) && !(peek(&l) == '*' && peek_at(&l, 1) == '/')) advance(&l);
             if (peek(&l)) { advance(&l); advance(&l); }
+            else {
+                Token bad = simple_tok(&l, TK_BAD, sl, sc);
+                bad.problem = "unterminated block comment";
+                emit(&l, bad);
+            }
             continue;
         }
         char c = peek(&l);
@@ -346,10 +355,10 @@ Token *wind_lex(const char *src, int *out_count) {
             continue;
         }
 
-        fprintf(stderr, "[lexer] %d:%d: unexpected character '%c' (0x%02x)\n",
-                sl, sc, c, (unsigned char)c);
         advance(&l);
-        emit(&l, simple_tok(&l, TK_BAD, sl, sc));
+        Token bad = simple_tok(&l, TK_BAD, sl, sc);
+        bad.problem = "unexpected character";
+        emit(&l, bad);
     }
 
     /* Финальный newline если файл им заканчивался */

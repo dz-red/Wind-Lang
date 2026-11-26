@@ -16,8 +16,9 @@ typedef struct { char name[64]; VType vt; } Sym;
 typedef struct { char name[64]; WType ret;  } FuncSig;
 
 static jmp_buf  cg_jb;
-static char    *cg_err;
-static int      cg_errcap;
+static WindDiagnostics *cg_diags;
+static const Stmt *cg_stmt, *cg_func;
+static const WindSource *cg_source;
 
 static Sym      g_glob[256]; static int g_nglob;
 static Sym      g_loc[256];  static int g_nloc;     /* сбрасывается на каждую функцию/main */
@@ -26,10 +27,20 @@ static int      g_rep_id;                            /* уникальные с�
 static int      g_gc_strings, g_in_main, g_gc_id, g_volatile, g_sqlite3;
 
 static void cg_fail(const char *fmt, ...) {
+    char message[256];
     va_list ap; va_start(ap, fmt);
-    if (cg_err && cg_errcap > 0) vsnprintf(cg_err, cg_errcap, fmt, ap);
+    vsnprintf(message, sizeof message, fmt, ap);
     va_end(ap);
+    wind_diag_emit(cg_diags, &(WindDiagnostic){
+        .code = WD_CODEGEN, .source = cg_source, .message = message,
+        .primary = cg_stmt ? (WindRange){.line = cg_stmt->line, .col = cg_stmt->col} : (WindRange){0}
+    });
     longjmp(cg_jb, 1);
+}
+
+static void cg_at(const Stmt *s) {
+    cg_stmt = s;
+    if (s->source) cg_source = s->source;
 }
 
 static void sym_add(Sym *arr, int *n, const char *name, VType vt) {
@@ -228,6 +239,42 @@ static WType infer(const Expr *e) {
         }
         default: return WT_UNKNOWN;  /* list/dict — считаются отдельно */
     }
+}
+
+static int numeric(WType t) {
+    return t == WT_INT || t == WT_FRAC || t == WT_BOOL;
+}
+
+static void check_return(const Stmt *s) {
+    if (!cg_func) return;
+    WType want = wt_base(cg_func->as.func.ret);
+    WType have = s->as.ret.value ? infer(s->as.ret.value) : WT_VOID;
+    if (have == WT_UNKNOWN || have == want || (numeric(want) && numeric(have))) return;
+
+    const char *expected = wind_type_name(want), *actual = wind_type_name(have);
+    char message[256], expected_label[48], actual_label[48], note[192];
+    snprintf(message, sizeof message, "expected `%s`, found `%s` in function `%.140s`",
+             expected, actual, cg_func->as.func.name);
+    snprintf(expected_label, sizeof expected_label, "ожидается `%s`", expected);
+    snprintf(actual_label, sizeof actual_label, "получен `%s`", actual);
+    snprintf(note, sizeof note, "функция `%.120s` возвращает `%s`", cg_func->as.func.name, expected);
+    const char *suggestions = "Верни значение объявленного типа или поменяй тип в сигнатуре,\n"
+                              "  если функция действительно должна возвращать другой тип.";
+    if (want == WT_INT && have == WT_STR) {
+        suggestions = "Если нужен числовой литерал, используй `return 100` вместо `return \"100\"`.\n"
+                      "  Если число приходит строкой, преобразуй её: `return int(text)`.\n"
+                      "  Если функция должна возвращать текст, укажи `-> str` в сигнатуре.";
+    } else if (want == WT_VOID) {
+        suggestions = "Если функция не должна ничего возвращать, используй `return` без значения.\n"
+                      "  Иначе объяви нужный тип после `->` в сигнатуре.";
+    }
+    wind_diag_emit(cg_diags, &(WindDiagnostic){
+        .code = WD_RETURN, .source = cg_func->source,
+        .primary = s->as.ret.range, .secondary = cg_func->as.func.type_range,
+        .message = message, .title = "несовместимый тип возвращаемого значения",
+        .label = actual_label, .secondary_label = expected_label, .note = note,
+        .suggestions = suggestions
+    });
 }
 
 static void emit_expr(FILE *o, const Expr *e);
@@ -955,6 +1002,7 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
             indent(o, ind); fputs("return", o);
             if (s->as.ret.value) { fputc(' ', o); emit_full_expr(o, s->as.ret.value); }
             fputs(";\n", o);
+            check_return(s);
             break;
         case ST_TRY: {
             if (g_gc_strings) {
@@ -1107,9 +1155,14 @@ static int stmt_needs_checkpoint(const Stmt *s) {
 }
 
 static void emit_stmt_at_checkpoint(FILE *o, const Stmt *s, int ind) {
+    const Stmt *saved_stmt = cg_stmt;
+    const WindSource *saved_source = cg_source;
+    cg_at(s);
     int checkpoint = g_gc_strings && stmt_needs_checkpoint(s);
     emit_stmt(o, s, ind);
     if (checkpoint) emit_gc_checkpoint(o, ind);
+    cg_stmt = saved_stmt;
+    cg_source = saved_source;
 }
 
 static void emit_block(FILE *o, const Block *b, int ind) {
@@ -1151,6 +1204,8 @@ static void emit_func_signature(FILE *o, const Stmt *s) {
 }
 
 static void emit_func(FILE *o, const Stmt *s) {
+    cg_at(s);
+    cg_func = s;
     g_volatile = g_gc_strings && block_has_try(&s->as.func.body);
     emit_func_signature(o, s);
     fputs(" {\n", o);
@@ -1164,10 +1219,14 @@ static void emit_func(FILE *o, const Stmt *s) {
     emit_block(o, &s->as.func.body, 1);
     fputs("}\n\n", o);
     g_volatile = 0;
+    cg_func = NULL;
 }
 
-int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_strings) {
-    cg_err = errbuf; cg_errcap = errcap;
+int wind_codegen(const Program *p, FILE *out, WindDiagnostics *diags, int gc_strings) {
+    cg_diags = diags;
+    cg_stmt = cg_func = NULL;
+    cg_source = NULL;
+    unsigned previous = diags->count;
     g_nglob = g_nloc = g_nfunc = g_rep_id = 0;
     g_gc_strings = gc_strings;
     g_in_main = g_gc_id = g_volatile = g_sqlite3 = 0;
@@ -1180,6 +1239,7 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_s
     /* пасс 1: сигнатуры функций + типы глобалов (чтобы вызовы/ссылки типизировались) */
     for (int i = 0; i < p->body.n; i++) {
         Stmt *s = p->body.items[i];
+        cg_at(s);
         if (s->kind == ST_FUNC) {
             if (g_nfunc >= 256) cg_fail("too many functions");
             snprintf(g_func[g_nfunc].name, sizeof g_func[g_nfunc].name, "%s", s->as.func.name);
@@ -1486,6 +1546,7 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_s
 
     for (int i = 0; i < p->body.n; i++)
         if (p->body.items[i]->kind == ST_FUNC) {
+            cg_at(p->body.items[i]);
             emit_func_signature(out, p->body.items[i]); fputs(";\n", out);
         }
     fputs("\n", out);
@@ -1494,6 +1555,7 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_s
     for (int i = 0; i < p->body.n; i++) {
         Stmt *s = p->body.items[i];
         if (s->kind != ST_VAR_DECL || !s->as.decl.is_global) continue;
+        cg_at(s);
         const DeclType *dt = &s->as.decl.dtype;
         if (dt->kind == DT_ARRAY) {
             fprintf(out, "%s %s[", ctype(wt_base(dt->base)), s->as.decl.name);
@@ -1533,6 +1595,7 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_s
     for (int i = 0; i < p->body.n; i++) {
         Stmt *s = p->body.items[i];
         if (s->kind != ST_VAR_DECL || !s->as.decl.is_global) continue;
+        cg_at(s);
         const DeclType *dt = &s->as.decl.dtype;
         if (g_gc_strings && dt->kind == DT_LIST) {
             WType el = wt_base(dt->base);
@@ -1560,5 +1623,5 @@ int wind_codegen(const Program *p, FILE *out, char *errbuf, int errcap, int gc_s
     }
     if (g_gc_strings) fputs("    wind_str_destroy();\n", out);
     indent(out, 1); fputs("return 0;\n}\n", out);
-    return 1;
+    return diags->count == previous;
 }

@@ -11,8 +11,9 @@ typedef struct {
     int     count;
     int     pos;
     jmp_buf jb;
-    char    err[256];
-    int     eline, ecol;
+    WindDiagnostics *diags;
+    const WindSource *source;
+    char *nested_error;
 } P;
 
 static char *dup_s(const char *s) {
@@ -40,13 +41,26 @@ static Token *adv(P *p) {
     return t;
 }
 
-static void perr(P *p, const char *fmt, ...) {
-    Token *t = tok(p);
-    p->eline = t->line; p->ecol = t->col;
-    va_list ap; va_start(ap, fmt);
-    vsnprintf(p->err, sizeof p->err, fmt, ap);
-    va_end(ap);
+static WindRange token_range(const Token *t) {
+    return (WindRange){t->line, t->col, t->end_line, t->end_col};
+}
+
+static _Noreturn void parse_error(P *p, const Token *t, const char *message) {
+    if (t->problem) message = t->problem;
+    if (p->nested_error) snprintf(p->nested_error, 256, "%s", message);
+    else wind_diag_emit(p->diags, &(WindDiagnostic){
+        .code = t->problem ? WD_LEX : WD_PARSE, .source = p->source,
+        .primary = token_range(t), .message = message
+    });
     longjmp(p->jb, 1);
+}
+
+static _Noreturn void perr(P *p, const char *fmt, ...) {
+    char message[256];
+    va_list ap; va_start(ap, fmt);
+    vsnprintf(message, sizeof message, fmt, ap);
+    va_end(ap);
+    parse_error(p, tok(p), message);
 }
 
 static int accept(P *p, TokenKind k) {
@@ -176,36 +190,39 @@ static void strvec_push(char ***arr, int *n, int *cap, char *s) {
     (*arr)[(*n)++] = s;
 }
 
-static Expr *parse_interp_placeholder(P *p, const char *inner, int line, int col) {
-    while (*inner == ' ' || *inner == '\t') inner++;
-    if (!*inner) { p->eline = line; p->ecol = col; perr(p, "empty braces {} in string"); }
-
-    int nt = 0;
-    Token *toks = wind_lex(inner, &nt);
+static Expr *parse_interp_expr(Token *toks, int nt, char *msg) {
     P sub;
     memset(&sub, 0, sizeof sub);
     sub.toks = toks; sub.count = nt; sub.pos = 0;
+    sub.nested_error = msg;
 
-    if (setjmp(sub.jb)) {
-        char msg[256];
-        snprintf(msg, sizeof msg, "%s", sub.err);
-        wind_tokens_free(toks, nt);
-        p->eline = line; p->ecol = col;
-        perr(p, "in {…}: %s", msg);
-    }
+    if (setjmp(sub.jb)) return NULL;
     Expr *e = parse_expr(&sub);
     if (cur(&sub) != TK_EOF) {
-        TokenKind extra = cur(&sub);
-        wind_tokens_free(toks, nt);
-        p->eline = line; p->ecol = col;
-        perr(p, "extra tokens in {…}: %s", wind_token_kind_name(extra));
+        ast_free_expr(e);
+        perr(&sub, "extra tokens: %s", wind_token_kind_name(cur(&sub)));
     }
+    return e;
+}
+
+static Expr *parse_interp_placeholder(const char *inner, char *msg) {
+    while (*inner == ' ' || *inner == '\t') inner++;
+    if (!*inner) {
+        snprintf(msg, 256, "empty expression");
+        return NULL;
+    }
+
+    int nt = 0;
+    Token *toks = wind_lex(inner, &nt);
+    Expr *e = parse_interp_expr(toks, nt, msg);
     wind_tokens_free(toks, nt);
     return e;
 }
 
 /* Только ${…} начинает интерполяцию; одиночные скобки остаются текстом. */
-static Expr *parse_string_literal(P *p, const char *raw, int line, int col) {
+static Expr *parse_string_literal(P *p, const Token *literal) {
+    const char *raw = literal->text;
+    int line = literal->line, col = literal->col;
     if (!raw || !strstr(raw, "${"))
         return ast_str(dup_s(raw ? raw : ""), line, col);
 
@@ -220,18 +237,30 @@ static Expr *parse_string_literal(P *p, const char *raw, int line, int col) {
     for (const char *s = raw; *s; ) {
         if (s[0] == '$' && s[1] == '{') {
             const char *close = strchr(s + 2, '}');
-            if (!close) { free(buf); p->eline = line; p->ecol = col;
-                          perr(p, "unclosed ${ in string (missing '}')"); }
+            char reason[256];
+            Expr *ph = NULL;
+            if (!close) {
+                snprintf(reason, sizeof reason, "missing '}'");
+            } else {
+                size_t inner_len = (size_t)(close - (s + 2));
+                char *inner = (char *)malloc(inner_len + 1);
+                if (!inner) { perror("malloc"); exit(1); }
+                memcpy(inner, s + 2, inner_len); inner[inner_len] = '\0';
+                ph = parse_interp_placeholder(inner, reason);
+                free(inner);
+            }
+            if (!ph) {
+                char message[280];
+                snprintf(message, sizeof message, "in ${…}: %s", reason);
+                free(buf);
+                for (int i = 0; i < nlit; i++) free(lits[i]);
+                for (int i = 0; i < nexp; i++) ast_free_expr(exprs[i]);
+                free(lits); free(exprs);
+                parse_error(p, literal, message);
+            }
             buf[bi] = '\0';
             strvec_push(&lits, &nlit, &litcap, dup_s(buf));
             bi = 0;
-
-            size_t inner_len = (size_t)(close - (s + 2));
-            char *inner = (char *)malloc(inner_len + 1);
-            if (!inner) { perror("malloc"); exit(1); }
-            memcpy(inner, s + 2, inner_len); inner[inner_len] = '\0';
-            Expr *ph = parse_interp_placeholder(p, inner, line, col);
-            free(inner);
             exprvec_push(&exprs, &nexp, &expcap, ph);
             s = close + 1;
         } else {
@@ -252,7 +281,7 @@ static Expr *parse_primary(P *p) {
         case TK_FRAC_LIT: adv(p); return ast_frac(t->fval, t->line, t->col);
         case TK_KW_TRUE:  adv(p); return ast_int(1, t->line, t->col);
         case TK_KW_FALSE: adv(p); return ast_int(0, t->line, t->col);
-        case TK_STR_LIT:  adv(p); return parse_string_literal(p, t->text, t->line, t->col);
+        case TK_STR_LIT:  adv(p); return parse_string_literal(p, t);
         case TK_IDENT:    adv(p); return ast_ident(dup_s(t->text), t->line, t->col);
         case TK_LBRACKET: return parse_bracket(p);
         case TK_KW_INT: case TK_KW_FRAC: case TK_KW_STR: case TK_KW_BOOL: {
@@ -584,7 +613,7 @@ static Stmt *parse_for(P *p, int line, int col) {
 }
 
 static Stmt *parse_func(P *p, int line, int col) {
-    expect(p, TK_KW_FUNC, "func");
+    Token *start = expect(p, TK_KW_FUNC, "func");
     Token *nm = expect(p, TK_IDENT, "function name");
     expect(p, TK_LPAREN, "(");
     Param *params = NULL; int nparams = 0, cap = 0;
@@ -608,11 +637,14 @@ static Stmt *parse_func(P *p, int line, int col) {
     }
     skipnl(p);
     expect(p, TK_RPAREN, ")");
+    WindRange type_range = token_range(start);
     TokenKind ret = TK_KW_VOID;
     if (accept(p, TK_ARROW)) {
         if (!is_scalar_type(cur(p)) && cur(p) != TK_KW_VOID)
             perr(p, "expected return type after '->', got %s", wind_token_kind_name(cur(p)));
-        ret = adv(p)->kind;
+        Token *type = adv(p);
+        ret = type->kind;
+        type_range = token_range(type);
     } else if (is_scalar_type(cur(p)) || cur(p) == TK_KW_VOID) {
         perr(p, "return type requires '->' (e.g. func f() -> str)");
     }
@@ -623,16 +655,21 @@ static Stmt *parse_func(P *p, int line, int col) {
     s->as.func.name = dup_s(nm->text);
     s->as.func.params = params; s->as.func.nparams = nparams;
     s->as.func.ret = ret; s->as.func.body = body;
+    s->as.func.type_range = type_range;
     return s;
 }
 
 static Stmt *parse_return(P *p, int line, int col) {
-    expect(p, TK_KW_RETURN, "return");
+    Token *keyword = expect(p, TK_KW_RETURN, "return");
     Stmt *s = ast_stmt(ST_RETURN, line, col);
-    if (cur(p) != TK_NEWLINE && cur(p) != TK_EOF)
+    s->as.ret.range = token_range(keyword);
+    if (cur(p) != TK_NEWLINE && cur(p) != TK_EOF) {
+        s->as.ret.range = token_range(tok(p));
         s->as.ret.value = parse_expr(p);
-    else
-        s->as.ret.value = NULL;
+        const Token *last = &p->toks[p->pos - 1];
+        s->as.ret.range.end_line = last->end_line;
+        s->as.ret.range.end_col = last->end_col;
+    }
     expect_eol(p);
     return s;
 }
@@ -665,12 +702,22 @@ static Stmt *parse_output(P *p, int line, int col) {
     Token *obj = expect(p, TK_IDENT, "terminal");
     expect(p, TK_DOT, ".");
     Token *field = expect(p, TK_IDENT, "paste");
-    Expr *target = ast_dot(ast_ident(dup_s(obj->text), line, col), dup_s(field->text), line, col);
+    if (strcmp(field->text, "paste")) {
+        char message[256], title[256];
+        snprintf(message, sizeof message, "unknown terminal method `%.160s`", field->text);
+        snprintf(title, sizeof title, "у `terminal` нет команды `%.160s`", field->text);
+        wind_diag_emit(p->diags, &(WindDiagnostic){
+            .code = WD_TERMINAL, .source = p->source, .primary = token_range(field),
+            .message = message, .title = title,
+            .suggestions = "Для вывода используй `paste`, например:\n    terminal.paste -> \"Hello\""
+        });
+    }
     expect(p, TK_ARROW, "->");
     Expr *val = parse_expr(p);
     expect_eol(p);
     Stmt *s = ast_stmt(ST_OUTPUT, line, col);
-    s->as.output.target = target; s->as.output.value = val;
+    s->as.output.target = ast_dot(ast_ident(dup_s(obj->text), line, col), dup_s(field->text), line, col);
+    s->as.output.value = val;
     return s;
 }
 
@@ -758,8 +805,8 @@ static Stmt *parse_stmt(P *p) {
         case TK_KW_CONTINUE: adv(p); expect_eol(p); return ast_stmt(ST_CONTINUE, line, col);
         case TK_IDENT: {
             const char *tx = t->text;
-            if (tx && !strcmp(tx, "terminal") && peekk(p, 1) == TK_DOT &&
-                peektext(p, 2) && !strcmp(peektext(p, 2), "paste"))
+            if (tx && !strcmp(tx, "terminal") && peekk(p, 1) == TK_DOT && peekk(p, 2) == TK_IDENT &&
+                (!strcmp(peektext(p, 2), "paste") || peekk(p, 3) == TK_ARROW))
                 return parse_output(p, line, col);
             if (tx && !strcmp(tx, "http") && peekk(p, 1) == TK_DOT &&
                 peektext(p, 2) && !strcmp(peektext(p, 2), "serve"))
@@ -773,23 +820,14 @@ static Stmt *parse_stmt(P *p) {
 }
 
 int wind_parse(Token *toks, int count, Program *out,
-               char *errbuf, int errcap, int *out_line, int *out_col) {
+               WindDiagnostics *diags, const WindSource *source) {
     P p;
     p.toks = toks; p.count = count; p.pos = 0;
-    p.err[0] = '\0'; p.eline = 0; p.ecol = 0;
+    p.diags = diags; p.source = source; p.nested_error = NULL;
+    unsigned previous = diags->count;
+    *out = (Program){0};
 
-    if (setjmp(p.jb)) {
-        if (errbuf && errcap > 0) snprintf(errbuf, errcap, "%s", p.err);
-        if (out_line) *out_line = p.eline;
-        if (out_col)  *out_col = p.ecol;
-        return 0;
-    }
-
-    Program prog;
-    prog.body.items = NULL;
-    prog.body.n = 0;
-    prog.nlinks = 0;
-    prog.nimports = 0;
+    if (setjmp(p.jb)) return 0;
 
     skipnl(&p);
     while (cur(&p) != TK_EOF) {
@@ -800,8 +838,8 @@ int wind_parse(Token *toks, int count, Program *out,
                      wind_token_kind_name(cur(&p)));
             }
             Token *t_str = tok(&p);
-            if (prog.nlinks < 32) {
-                prog.links[prog.nlinks++] = dup_s(t_str->text);
+            if (out->nlinks < 32) {
+                out->links[out->nlinks++] = dup_s(t_str->text);
             }
             adv(&p);
             expect_eol(&p);
@@ -811,11 +849,8 @@ int wind_parse(Token *toks, int count, Program *out,
         if (cur(&p) == TK_KW_USE) {
             adv(&p);
             Token *m = expect(&p, TK_IDENT, "module name after 'use'");
-            if (prog.nimports < 32) {
-                prog.imports[prog.nimports].module = dup_s(m->text);
-                prog.imports[prog.nimports].names  = NULL;
-                prog.imports[prog.nimports].nnames = 0;
-                prog.nimports++;
+            if (out->nimports < 32) {
+                out->imports[out->nimports++] = (Import){dup_s(m->text), NULL, 0, token_range(m)};
             }
             expect_eol(&p);
             skipnl(&p);
@@ -842,11 +877,11 @@ int wind_parse(Token *toks, int count, Program *out,
             expect(&p, TK_KW_FROM, "'from' after the list of names");
             Token *m = expect(&p, TK_IDENT, "module name after 'from'");
 
-            if (prog.nimports < 32) {
-                prog.imports[prog.nimports].module = dup_s(m->text);
-                prog.imports[prog.nimports].names  = names;
-                prog.imports[prog.nimports].nnames = n;
-                prog.nimports++;
+            if (out->nimports < 32) {
+                out->imports[out->nimports++] = (Import){dup_s(m->text), names, n, token_range(m)};
+            } else {
+                for (int i = 0; i < n; i++) free(names[i]);
+                free(names);
             }
             expect_eol(&p);
             skipnl(&p);
@@ -854,10 +889,12 @@ int wind_parse(Token *toks, int count, Program *out,
         }
 
         Stmt *s = parse_stmt(&p);
-        if (s) block_push(&prog.body, s);
+        if (s) {
+            s->source = source;
+            block_push(&out->body, s);
+        }
         skipnl(&p);
     }
 
-    *out = prog;
-    return 1;
+    return diags->count == previous;
 }
