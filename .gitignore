@@ -8,6 +8,7 @@
 /app2
 /output.c
 /output_ast.c
+/wind-vscode/*.vsix
 
 # Результаты локальных запусков примеров
 /wnd files/app
