@@ -19,13 +19,14 @@ static jmp_buf  cg_jb;
 static WindDiagnostics *cg_diags;
 static const Stmt *cg_stmt, *cg_func;
 static const WindSource *cg_source;
+static const Program *cg_program;
 static WindRange cg_interp_range;
 
 static Sym      g_glob[256]; static int g_nglob;
 static Sym      g_loc[256];  static int g_nloc;     /* сбрасывается на каждую функцию/main */
 static FuncSig  g_func[256]; static int g_nfunc;
 static int      g_rep_id;                            /* уникальные счётчики repeat-циклов */
-static int      g_gc_strings, g_in_main, g_gc_id, g_volatile, g_sqlite3;
+static int      g_gc_strings, g_in_main, g_gc_id, g_volatile;
 
 static void cg_fail(const char *fmt, ...) {
     char message[256];
@@ -69,7 +70,6 @@ static WType func_ret(const char *name) {
 }
 
 static WType native_ret(const char *name) {
-    if (g_sqlite3 && !strcmp(name, "sqlite3_libversion")) return WT_STR;
     if (!g_gc_strings) return WT_UNKNOWN;
     static const char *names[] = {
         "acos", "asin", "atan", "atan2", "ceil", "cos", "exp", "fabs", "floor",
@@ -144,6 +144,50 @@ static const char *list_suffix(WType t) {
 
 static WType infer(const Expr *e);
 
+static _Noreturn void c_call_error(const Expr *callee, const char *message, const char *suggestions) {
+    WindRange range = {.line = callee->line, .col = callee->col};
+    wind_diag_emit(cg_diags, &(WindDiagnostic){
+        .code = WD_C_IMPORT, .source = cg_source,
+        .primary = cg_interp_range.line ? cg_interp_range : range,
+        .message = message, .suggestions = suggestions
+    });
+    longjmp(cg_jb, 1);
+}
+
+static const WindCFunction *imported_c_function(const Expr *callee) {
+    const Expr *receiver = callee->as.dot.obj;
+    if (receiver->kind != EX_IDENT) return NULL;
+    const WindCModule *module = wind_c_module(receiver->as.ident);
+    if (!module) return NULL;
+    char message[256], suggestion[128];
+    if (!ast_has_c_import(cg_program, module)) {
+        if (var_vtype(receiver->as.ident).elem != WT_UNKNOWN) return NULL;
+        snprintf(message, sizeof message, "C binding `%s` is not imported", module->name);
+        snprintf(suggestion, sizeof suggestion, "Add `c.import <%s>` at the top level.", module->name);
+        c_call_error(callee, message, suggestion);
+    }
+    const WindCFunction *function = wind_c_function(module, callee->as.dot.field);
+    if (function) return function;
+    snprintf(message, sizeof message, "C binding `%s` has no function `%.140s`",
+             module->name, callee->as.dot.field);
+    snprintf(suggestion, sizeof suggestion, "This binding provides `%s.%s()`.",
+             module->name, module->functions[0].name);
+    c_call_error(callee, message, suggestion);
+}
+
+static int legacy_c_link(const WindCModule *module) {
+    return module->legacy_link && ast_has_link(cg_program, module->library);
+}
+
+static const WindCFunction *legacy_c_function(const char *name) {
+    for (const WindCModule *m = wind_c_modules; m->name; m++) {
+        if (!legacy_c_link(m)) continue;
+        for (const WindCFunction *f = m->functions; f->name; f++)
+            if (!strcmp(f->symbol, name)) return f;
+    }
+    return NULL;
+}
+
 static WType infer_binary(const Expr *e) {
     TokenKind op = e->as.binary.op;
     switch (op) {
@@ -183,6 +227,8 @@ static WType infer(const Expr *e) {
         case EX_CALL: {
             const Expr *c = e->as.call.callee;
             if (c->kind == EX_DOT) {
+                const WindCFunction *binding = imported_c_function(c);
+                if (binding) return wt_base(binding->result);
                 const Expr *o2 = c->as.dot.obj;
                 if (o2->kind == EX_IDENT && !strcmp(o2->as.ident, "file")) {
                     if (!strcmp(c->as.dot.field, "read"))   return WT_STR;
@@ -235,7 +281,9 @@ static WType infer(const Expr *e) {
                 if (!strcmp(c->as.ident, "bool")) return WT_BOOL;
                 if (!strcmp(c->as.ident, "len")) return WT_INT;
                 WType t = func_ret(c->as.ident);
-                return t == WT_UNKNOWN ? native_ret(c->as.ident) : t;
+                if (t != WT_UNKNOWN) return t;
+                const WindCFunction *binding = legacy_c_function(c->as.ident);
+                return binding ? wt_base(binding->result) : native_ret(c->as.ident);
             }
             return WT_UNKNOWN;
         }
@@ -391,6 +439,25 @@ static _Noreturn void interpolation_error(const Expr *expr, WType type) {
     longjmp(cg_jb, 1);
 }
 
+static void emit_c_call(FILE *o, const Expr *e, const WindCFunction *binding) {
+    const Expr *callee = e->as.call.callee;
+    if (e->as.call.nargs != 0) {
+        char message[256], suggestion[256];
+        if (callee->kind == EX_DOT) {
+            const char *name = callee->as.dot.obj->as.ident;
+            snprintf(message, sizeof message, "`%s.%s()` expects no arguments", name, binding->name);
+            snprintf(suggestion, sizeof suggestion, "Use `%s.%s()`.", name, binding->name);
+        } else {
+            snprintf(message, sizeof message, "`%s()` expects no arguments", binding->symbol);
+            snprintf(suggestion, sizeof suggestion, "Use `%s()`.", binding->symbol);
+        }
+        c_call_error(callee, message, suggestion);
+    }
+    if (binding->copy_string) fputs("wstr_dup(", o);
+    fprintf(o, "%s()", binding->symbol);
+    if (binding->copy_string) fputc(')', o);
+}
+
 static void emit_expr(FILE *o, const Expr *e) {
     switch (e->kind) {
         case EX_INT:   fprintf(o, "%ld", e->as.ival); break;
@@ -462,6 +529,11 @@ static void emit_expr(FILE *o, const Expr *e) {
         case EX_CALL: {
             const Expr *c = e->as.call.callee;
             if (c->kind == EX_DOT) {
+                const WindCFunction *binding = imported_c_function(c);
+                if (binding) {
+                    emit_c_call(o, e, binding);
+                    break;
+                }
                 const Expr *obj = c->as.dot.obj;
                 const char *m = c->as.dot.field;
             if (obj->kind == EX_IDENT && !strcmp(obj->as.ident, "time")) {
@@ -608,14 +680,17 @@ static void emit_expr(FILE *o, const Expr *e) {
                 }
                 break;
             }
-            if (g_gc_strings && func_ret(fn) == WT_UNKNOWN && native_ret(fn) == WT_UNKNOWN)
-                cg_fail("--gc-strings: unknown function '%s'", fn);
-            if (g_gc_strings && func_ret(fn) == WT_UNKNOWN && native_ret(fn) == WT_STR) {
-                if (e->as.call.nargs) cg_fail("%s expects no arguments", fn);
-                fprintf(o, "wstr_dup(%s())", fn);
-                break;
+            WType user_ret = func_ret(fn);
+            if (user_ret == WT_UNKNOWN) {
+                const WindCFunction *binding = legacy_c_function(fn);
+                if (binding) {
+                    emit_c_call(o, e, binding);
+                    break;
+                }
+                if (g_gc_strings && native_ret(fn) == WT_UNKNOWN)
+                    cg_fail("--gc-strings: unknown function '%s'", fn);
             }
-            int keep = g_gc_strings && func_ret(fn) == WT_STR;
+            int keep = g_gc_strings && user_ret == WT_STR;
             if (keep) fputs("WIND_STR_KEEP(", o);
             fprintf(o, "%s(", fn);
             for (int i = 0; i < e->as.call.nargs; i++) {
@@ -1274,18 +1349,16 @@ static void emit_func(FILE *o, const Stmt *s) {
 
 int wind_codegen(const Program *p, FILE *out, WindDiagnostics *diags, int gc_strings) {
     cg_diags = diags;
+    cg_program = p;
     cg_stmt = cg_func = NULL;
     cg_source = NULL;
     cg_interp_range = (WindRange){0};
     unsigned previous = diags->count;
     g_nglob = g_nloc = g_nfunc = g_rep_id = 0;
     g_gc_strings = gc_strings;
-    g_in_main = g_gc_id = g_volatile = g_sqlite3 = 0;
+    g_in_main = g_gc_id = g_volatile = 0;
 
     if (setjmp(cg_jb)) return 0;
-    for (int i = 0; i < p->nlinks; i++)
-        if (!strcmp(p->links[i], "\"sqlite3\"") || !strcmp(p->links[i], "sqlite3"))
-            g_sqlite3 = 1;
 
     /* пасс 1: сигнатуры функций + типы глобалов (чтобы вызовы/ссылки типизировались) */
     for (int i = 0; i < p->body.n; i++) {
@@ -1322,7 +1395,9 @@ int wind_codegen(const Program *p, FILE *out, WindDiagnostics *diags, int gc_str
     /* преамбула */
     fputs("/* Generated by Wind AST codegen */\n", out);
     fputs("#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdarg.h>\n#include <stdint.h>\n#include <time.h>\n#include <math.h>\n\n", out);
-    if (g_sqlite3) fputs("#include <sqlite3.h>\n", out);
+    for (const WindCModule *m = wind_c_modules; m->name; m++)
+        if (ast_has_c_import(p, m) || legacy_c_link(m))
+            fprintf(out, "#include <%s>\n", m->header);
 
     if (g_gc_strings) {
         fputs("#include \"strings_gc.h\"\n#include \"collections_gc.h\"\n"

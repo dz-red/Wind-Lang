@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include "lexer.h"
 #include "errors.h"
+#include "cimports.h"
 
 typedef enum {
     EX_INT,
@@ -116,10 +117,14 @@ typedef struct {
     WindRange range;
 } Import;
 
+enum { WIND_MAX_LINKS = 32, WIND_MAX_C_IMPORTS = 16 };
+
 typedef struct { 
     Block body; 
-    char *links[32];
+    char *links[WIND_MAX_LINKS];
     int nlinks;
+    const WindCModule *c_imports[WIND_MAX_C_IMPORTS];
+    int nc_imports;
     Import imports[32];
     int nimports;
 } Program;
@@ -148,6 +153,9 @@ void ast_free_expr(Expr *e);
 void ast_free_stmt(Stmt *s);
 void ast_free_block(Block *b);
 void ast_free_program(Program *p);
+int ast_has_link(const Program *p, const char *name);
+int ast_has_c_import(const Program *p, const WindCModule *module);
+int ast_add_c_import(Program *p, const WindCModule *module);
 
 void ast_dump_program(const Program *p, FILE *out);
 

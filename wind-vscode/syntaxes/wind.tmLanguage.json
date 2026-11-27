@@ -41,6 +41,15 @@
     "declarations": {
       "patterns": [
         {
+          "match": "\\b(c\\s*\\.\\s*import)\\s*(<)\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(>)",
+          "captures": {
+            "1": { "name": "keyword.control.import.wnd" },
+            "2": { "name": "punctuation.definition.import.begin.wnd" },
+            "3": { "name": "entity.name.namespace.wnd" },
+            "4": { "name": "punctuation.definition.import.end.wnd" }
+          }
+        },
+        {
           "match": "\\b(func|fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "1": { "name": "keyword.declaration.function.wnd" },

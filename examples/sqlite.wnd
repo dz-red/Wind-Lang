@@ -1,0 +1,3 @@
+c.import <sqlite>
+
+terminal.paste -> "SQLite ${sqlite.version()}"

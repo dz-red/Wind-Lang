@@ -97,6 +97,13 @@ static int load_one(Program *prog, const char *dir, const Import *import,
         return 0;
     }
 
+    for (int i = 0; i < sub.nc_imports; i++) {
+        if (ast_add_c_import(prog, sub.c_imports[i])) continue;
+        snprintf(error, sizeof error, "too many C imports in module '%s'", module);
+        ast_free_program(&sub);
+        goto report;
+    }
+
     char *fnames[128];
     int   nfn   = 0;
 
@@ -119,7 +126,7 @@ static int load_one(Program *prog, const char *dir, const Import *import,
         sub.body.items[i] = NULL;
     }
 
-    for (int i = 0; i < sub.nlinks && prog->nlinks < 32; i++) {
+    for (int i = 0; i < sub.nlinks && prog->nlinks < WIND_MAX_LINKS; i++) {
         prog->links[prog->nlinks++] = sub.links[i];
         sub.links[i] = NULL;
     }

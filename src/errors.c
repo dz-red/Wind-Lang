@@ -69,12 +69,15 @@ static const char *explanation(WindDiagCode code) {
             return "An expression inside `${...}` must produce an `int`, `frac`, `str`, or `bool`.\n"
                    "  A type prefix such as `str` in `str.title` is optional.\n"
                    "  If present, it must match the variable's declared type.";
+        case WD_C_IMPORT:
+            return "`c.import` enables a named C binding provided by Wind, not an arbitrary C header.\n"
+                   "  Each binding defines the functions available in its namespace.";
         default: return NULL;
     }
 }
 
 int wind_diag_explain(const char *code) {
-    const WindDiagCode codes[] = {WD_TERMINAL, WD_PARSE, WD_RETURN, WD_INTERPOLATION};
+    const WindDiagCode codes[] = {WD_TERMINAL, WD_PARSE, WD_RETURN, WD_INTERPOLATION, WD_C_IMPORT};
     for (size_t i = 0; i < sizeof codes / sizeof *codes; i++) {
         WindDiagCode id = codes[i];
         const char *text = explanation(id);
@@ -90,6 +93,8 @@ int wind_diag_explain(const char *code) {
             if (id == WD_RETURN) puts("\n  Example:\n    func price() -> int\n        return 100\n    end");
             if (id == WD_INTERPOLATION)
                 puts("\n  Example:\n    str.title = \"Wind\"\n    terminal.paste -> \"=== ${title} ===\"");
+            if (id == WD_C_IMPORT)
+                puts("\n  Example:\n    c.import <sqlite>\n    terminal.paste -> sqlite.version()");
             return 1;
         }
     }

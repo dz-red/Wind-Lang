@@ -199,7 +199,32 @@ void ast_free_program(Program *p) {
         for (int j = 0; j < im->nnames; j++) free(im->names[j]);
         free(im->names);
     }
-    p->nlinks = p->nimports = 0;
+    p->nlinks = p->nimports = p->nc_imports = 0;
+}
+
+int ast_has_link(const Program *p, const char *name) {
+    size_t length = strlen(name);
+    for (int i = 0; i < p->nlinks; i++) {
+        const char *link = p->links[i];
+        if (!strcmp(link, name) ||
+            (link[0] == '"' && strlen(link) == length + 2 && !strncmp(link + 1, name, length) &&
+             link[length + 1] == '"'))
+            return 1;
+    }
+    return 0;
+}
+
+int ast_has_c_import(const Program *p, const WindCModule *module) {
+    for (int i = 0; i < p->nc_imports; i++)
+        if (p->c_imports[i] == module) return 1;
+    return 0;
+}
+
+int ast_add_c_import(Program *p, const WindCModule *module) {
+    if (ast_has_c_import(p, module)) return 1;
+    if (p->nc_imports == WIND_MAX_C_IMPORTS) return 0;
+    p->c_imports[p->nc_imports++] = module;
+    return 1;
 }
 
 static void indent(FILE *o, int d) { for (int i = 0; i < d; i++) fputs("  ", o); }
@@ -389,7 +414,9 @@ static void dump_block(FILE *o, const Block *b, int d) {
 
 void ast_dump_program(const Program *p, FILE *out) {
     fprintf(out, "Program [%d top-level]:\n", p->body.n);
-        for (int i = 0; i < p->nimports; i++) {
+    for (int i = 0; i < p->nc_imports; i++)
+        fprintf(out, "  C import <%s>\n", p->c_imports[i]->name);
+    for (int i = 0; i < p->nimports; i++) {
         const Import *im = &p->imports[i];
         if (im->names == NULL) {
             fprintf(out, "  Use %s\n", im->module);

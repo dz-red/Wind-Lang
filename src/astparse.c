@@ -844,6 +844,32 @@ static Block parse_block(P *p) {
     return b;
 }
 
+static int at_c_import(P *p) {
+    return cur(p) == TK_IDENT && !strcmp(tok(p)->text, "c") &&
+           peekk(p, 1) == TK_DOT && peekk(p, 2) == TK_IDENT &&
+           !strcmp(peektext(p, 2), "import");
+}
+
+static void parse_c_import(P *p, Program *out) {
+    adv(p); adv(p); adv(p);
+    expect(p, TK_LT, "'<' after 'c.import'");
+    Token *name = expect(p, TK_IDENT, "C binding name");
+    expect(p, TK_GT, "'>' after C binding name");
+    expect_eol(p);
+
+    const WindCModule *module = wind_c_module(name->text);
+    if (!module) {
+        char message[256];
+        snprintf(message, sizeof message, "unknown C binding `%.160s`", name->text);
+        wind_diag_emit(p->diags, &(WindDiagnostic){
+            .code = WD_C_IMPORT, .source = p->source, .primary = token_range(name),
+            .message = message, .suggestions = "SQLite is available as `c.import <sqlite>`."
+        });
+        longjmp(p->jb, 1);
+    }
+    if (!ast_add_c_import(out, module)) parse_error(p, name, "too many C imports");
+}
+
 static Stmt *parse_stmt(P *p) {
     skipnl(p);
     Token *t = tok(p);
@@ -867,6 +893,7 @@ static Stmt *parse_stmt(P *p) {
         case TK_KW_CONTINUE: adv(p); expect_eol(p); return ast_stmt(ST_CONTINUE, line, col);
         case TK_IDENT: {
             const char *tx = t->text;
+            if (at_c_import(p)) perr(p, "`c.import` is only allowed at the top level");
             if (tx && !strcmp(tx, "terminal") && peekk(p, 1) == TK_DOT && peekk(p, 2) == TK_IDENT &&
                 (!strcmp(peektext(p, 2), "paste") || peekk(p, 3) == TK_ARROW))
                 return parse_output(p, line, col);
@@ -893,6 +920,11 @@ int wind_parse(Token *toks, int count, Program *out,
 
     skipnl(&p);
     while (cur(&p) != TK_EOF) {
+        if (at_c_import(&p)) {
+            parse_c_import(&p, out);
+            skipnl(&p);
+            continue;
+        }
         if (cur(&p) == TK_KW_LINK) {
             adv(&p);
             if (cur(&p) != TK_STR_LIT) {
@@ -900,7 +932,7 @@ int wind_parse(Token *toks, int count, Program *out,
                      wind_token_kind_name(cur(&p)));
             }
             Token *t_str = tok(&p);
-            if (out->nlinks < 32) {
+            if (out->nlinks < WIND_MAX_LINKS) {
                 out->links[out->nlinks++] = dup_s(t_str->text);
             }
             adv(&p);

@@ -6,6 +6,38 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "ast.h"
+
+enum { MAX_BUILD_LINKS = WIND_MAX_LINKS + WIND_MAX_C_IMPORTS, LINK_FLAG_SIZE = 256 };
+
+static int build_links(const Program *p, const char **links) {
+    int n = p->nlinks;
+    for (int i = 0; i < n; i++) links[i] = p->links[i];
+    for (int i = 0; i < p->nc_imports; i++) {
+        const char *library = p->c_imports[i]->library;
+        if (ast_has_link(p, library)) continue;
+        int j = p->nlinks;
+        while (j < n && strcmp(links[j], library)) j++;
+        if (j == n) links[n++] = library;
+    }
+    return n;
+}
+
+static int format_link(const char *name, char *flag) {
+    size_t length = strlen(name);
+    if (length >= 2 && name[0] == '"' && name[length - 1] == '"') {
+        name++;
+        length -= 2;
+    }
+    if (!length || length > LINK_FLAG_SIZE - 3 ||
+        strspn(name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.+-:") < length) {
+        fputs("[wind] invalid library name\n", stderr);
+        return 0;
+    }
+    snprintf(flag, LINK_FLAG_SIZE, "-l%.*s", (int)length, name);
+    return 1;
+}
+
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
@@ -20,29 +52,18 @@
 #define WIND_RUNTIME_DIR "runtime"
 #endif
 
-static int build_gc_strings(int nlinks, char *const *links) {
-    char *args[64] = {
+static int build_gc_strings(int nlinks, const char *const *links) {
+    char *args[16 + MAX_BUILD_LINKS] = {
         "gcc", "-O2", "-Werror=int-conversion", "-Werror=incompatible-pointer-types",
         "-Werror=return-type", "-I", WIND_RUNTIME_DIR, "-o", "app", "output_ast.c",
         WIND_RUNTIME_DIR "/gc.c", WIND_RUNTIME_DIR "/strings_gc.c",
         WIND_RUNTIME_DIR "/collections_gc.c", "-lm", NULL
     };
-    char flags[32][256];
+    char flags[MAX_BUILD_LINKS][LINK_FLAG_SIZE];
     size_t argc = 0;
     while (args[argc]) argc++;
     for (int i = 0; i < nlinks; i++) {
-        const char *name = links[i];
-        size_t length = strlen(name);
-        if (length >= 2 && name[0] == '"' && name[length - 1] == '"') {
-            name++;
-            length -= 2;
-        }
-        if (!length || length > sizeof flags[i] - 3 ||
-            strspn(name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.+-:") < length) {
-            fputs("[wind] invalid library name\n", stderr);
-            return 0;
-        }
-        snprintf(flags[i], sizeof flags[i], "-l%.*s", (int)length, name);
+        if (!format_link(links[i], flags[i])) return 0;
         args[argc++] = flags[i];
     }
     args[argc] = NULL;
@@ -69,7 +90,6 @@ static int build_gc_strings(int nlinks, char *const *links) {
 
 #include "errors.h"
 #include "lexer.h"
-#include "ast.h"
 #include "astparse.h"
 #include "astcodegen.h"
 #include "modules.h"
@@ -205,9 +225,11 @@ int main(int argc, char *argv[]) {
     if (!ok) goto failed;
     if (mode_check) goto done;
 
+    const char *links[MAX_BUILD_LINKS];
+    int nlinks = build_links(&prog, links);
 #ifndef _WIN32
     if (gc_strings) {
-        if (!build_gc_strings(prog.nlinks, prog.links)) goto gcc_failed;
+        if (!build_gc_strings(nlinks, links)) goto gcc_failed;
         goto compiled;
     }
 #endif
@@ -220,15 +242,12 @@ int main(int argc, char *argv[]) {
     snprintf(gcc_cmd, sizeof(gcc_cmd), "LC_ALL=C gcc -O2 -o app output_ast.c -lgc -lm");
 #endif
 
-    for (int i = 0; i < prog.nlinks; i++) {
-        char *lib = prog.links[i];
-        strncat(gcc_cmd, " -l", sizeof(gcc_cmd) - strlen(gcc_cmd) - 1);
-        if (lib[0] == '"') {
-            size_t len = strlen(lib);
-            if (len >= 2) strncat(gcc_cmd, lib + 1, len - 2);
-        } else {
-            strncat(gcc_cmd, lib, sizeof(gcc_cmd) - strlen(gcc_cmd) - 1);
-        }
+    for (int i = 0; i < nlinks; i++) {
+        char flag[LINK_FLAG_SIZE];
+        if (!format_link(links[i], flag)) goto gcc_failed;
+        size_t used = strlen(gcc_cmd);
+        int written = snprintf(gcc_cmd + used, sizeof(gcc_cmd) - used, " %s", flag);
+        if (written < 0 || (size_t)written >= sizeof(gcc_cmd) - used) goto gcc_failed;
     }
 
     if (system(gcc_cmd) != 0) goto gcc_failed;
