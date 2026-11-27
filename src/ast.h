@@ -119,11 +119,18 @@ typedef struct {
 
 enum { WIND_MAX_LINKS = 32, WIND_MAX_C_IMPORTS = 16 };
 
+typedef struct {
+    char *name;
+    const WindSource *source;
+    WindRange range;
+    const WindCModule *binding;
+} CImport;
+
 typedef struct { 
     Block body; 
     char *links[WIND_MAX_LINKS];
     int nlinks;
-    const WindCModule *c_imports[WIND_MAX_C_IMPORTS];
+    CImport c_imports[WIND_MAX_C_IMPORTS];
     int nc_imports;
     Import imports[32];
     int nimports;
@@ -155,7 +162,8 @@ void ast_free_block(Block *b);
 void ast_free_program(Program *p);
 int ast_has_link(const Program *p, const char *name);
 int ast_has_c_import(const Program *p, const WindCModule *module);
-int ast_add_c_import(Program *p, const WindCModule *module);
+int ast_add_c_import(Program *p, const char *name, const WindSource *source, WindRange range);
+int ast_resolve_c_imports(Program *p, const WindSource *entry, WindDiagnostics *diags);
 
 void ast_dump_program(const Program *p, FILE *out);
 

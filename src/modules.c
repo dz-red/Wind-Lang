@@ -98,7 +98,8 @@ static int load_one(Program *prog, const char *dir, const Import *import,
     }
 
     for (int i = 0; i < sub.nc_imports; i++) {
-        if (ast_add_c_import(prog, sub.c_imports[i])) continue;
+        const CImport *im = &sub.c_imports[i];
+        if (ast_add_c_import(prog, im->name, im->source, im->range)) continue;
         snprintf(error, sizeof error, "too many C imports in module '%s'", module);
         ast_free_program(&sub);
         goto report;

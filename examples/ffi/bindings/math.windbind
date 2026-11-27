@@ -1,0 +1,7 @@
+header <math.h>
+link "m"
+
+func sqrt(frac.x) -> frac = sqrt
+func pow(frac.x, frac.y) -> frac = pow
+func sin(frac.x) -> frac = sin
+func cos(frac.x) -> frac = cos

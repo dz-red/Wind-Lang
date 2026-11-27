@@ -1,0 +1,4 @@
+header <zlib.h>
+link "z"
+
+func version() -> str = zlibVersion copy_cstr

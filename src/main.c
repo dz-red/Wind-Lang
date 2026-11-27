@@ -14,8 +14,8 @@ static int build_links(const Program *p, const char **links) {
     int n = p->nlinks;
     for (int i = 0; i < n; i++) links[i] = p->links[i];
     for (int i = 0; i < p->nc_imports; i++) {
-        const char *library = p->c_imports[i]->library;
-        if (ast_has_link(p, library)) continue;
+        const char *library = p->c_imports[i].binding->library;
+        if (!strcmp(library, "m") || ast_has_link(p, library)) continue;
         int j = p->nlinks;
         while (j < n && strcmp(links[j], library)) j++;
         if (j == n) links[n++] = library;
@@ -52,16 +52,19 @@ static int format_link(const char *name, char *flag) {
 #define WIND_RUNTIME_DIR "runtime"
 #endif
 
-static int build_gc_strings(int nlinks, const char *const *links) {
-    char *args[16 + MAX_BUILD_LINKS] = {
+static int build_program(int gc_strings, int nlinks, const char *const *links, FILE *log) {
+    char *wgc[] = {
         "gcc", "-O2", "-Werror=int-conversion", "-Werror=incompatible-pointer-types",
         "-Werror=return-type", "-I", WIND_RUNTIME_DIR, "-o", "app", "output_ast.c",
         WIND_RUNTIME_DIR "/gc.c", WIND_RUNTIME_DIR "/strings_gc.c",
         WIND_RUNTIME_DIR "/collections_gc.c", "-lm", NULL
     };
+    char *boehm[] = {"gcc", "-O2", "-o", "app", "output_ast.c", "-lgc", "-lm", NULL};
+    char **base = gc_strings ? wgc : boehm;
+    char *args[sizeof wgc / sizeof *wgc + MAX_BUILD_LINKS];
     char flags[MAX_BUILD_LINKS][LINK_FLAG_SIZE];
     size_t argc = 0;
-    while (args[argc]) argc++;
+    while (base[argc]) { args[argc] = base[argc]; argc++; }
     for (int i = 0; i < nlinks; i++) {
         if (!format_link(links[i], flags[i])) return 0;
         args[argc++] = flags[i];
@@ -70,6 +73,7 @@ static int build_gc_strings(int nlinks, const char *const *links) {
     pid_t child = fork();
     if (child < 0) { perror("fork"); return 0; }
     if (child == 0) {
+        if (log && dup2(fileno(log), STDERR_FILENO) < 0) _exit(127);
         if (setenv("LC_ALL", "C", 1) != 0) {
             fputs("[wind] cannot set the locale for GCC\n", stderr);
             _exit(127);
@@ -86,6 +90,28 @@ static int build_gc_strings(int nlinks, const char *const *links) {
     }
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
+#else
+static int build_program(int gc_strings, int nlinks, const char *const *links, FILE *log) {
+    (void)gc_strings;
+    char cmd[1024] = "set \"LC_ALL=C\" && gcc -O2 -DGC_NOT_DLL -o app output_ast.c -static -lgc -lm -lws2_32";
+    for (int i = 0; i < nlinks; i++) {
+        char flag[LINK_FLAG_SIZE];
+        if (!format_link(links[i], flag)) return 0;
+        size_t used = strlen(cmd);
+        int written = snprintf(cmd + used, sizeof(cmd) - used, " %s", flag);
+        if (written < 0 || (size_t)written >= sizeof(cmd) - used) return 0;
+    }
+    int saved = -1;
+    if (log) {
+        fflush(stderr);
+        saved = _dup(_fileno(stderr));
+        if (saved < 0) return 0;
+        if (_dup2(_fileno(log), _fileno(stderr)) < 0) { _close(saved); return 0; }
+    }
+    int status = system(cmd);
+    if (saved >= 0) { _dup2(saved, _fileno(stderr)); _close(saved); }
+    return status == 0;
+}
 #endif
 
 #include "errors.h"
@@ -93,6 +119,58 @@ static int build_gc_strings(int nlinks, const char *const *links) {
 #include "astparse.h"
 #include "astcodegen.h"
 #include "modules.h"
+
+static int report_c_build_error(const Program *p, WindDiagnostics *diags, FILE *log) {
+    char line[4096];
+    while (fgets(line, sizeof line, log)) {
+        int i = -1, fn = -1;
+        WindDiagCode code;
+        if (strstr(line, ": fatal error: ") && strstr(line, "No such file or directory") &&
+            sscanf(line, "wind-ffi-header-%d:", &i) == 1) {
+            code = WD_C_HEADER;
+        } else if (strstr(line, ": error: ") &&
+                   sscanf(line, "wind-ffi-signature-%d-%d:", &i, &fn) == 2) {
+            code = WD_C_SIGNATURE;
+        } else {
+            const char *needle = "cannot find -l";
+            const char *lib = strstr(line, needle);
+            if (!lib) { needle = "unable to find library -l"; lib = strstr(line, needle); }
+            if (!lib) continue;
+            lib += strlen(needle);
+            size_t len = strcspn(lib, " \t\r\n:");
+            for (i = 0; i < p->nc_imports; i++) {
+                const char *name = p->c_imports[i].binding->library;
+                if (strlen(name) == len && !strncmp(name, lib, len)) break;
+            }
+            code = WD_C_LIBRARY;
+        }
+        if (i < 0 || i >= p->nc_imports) continue;
+        const CImport *import = &p->c_imports[i];
+        const WindCModule *m = import->binding;
+        WindRange range = import->range;
+        char message[512];
+        if (code == WD_C_HEADER) {
+            snprintf(message, sizeof message, "C header `%s` not found", m->header);
+            if (m->source) range = m->header_range;
+        } else if (code == WD_C_LIBRARY) {
+            snprintf(message, sizeof message, "C library `%s` not found by the linker", m->library);
+            if (m->source) range = m->library_range;
+        } else {
+            int j = 0;
+            while (j < fn && m->functions[j].name) j++;
+            if (fn < 0 || j != fn || !m->functions[j].name) continue;
+            snprintf(message, sizeof message, "C signature for `%.180s` does not match binding `%.100s`",
+                     m->functions[fn].symbol, m->name);
+            if (m->source) range = m->functions[fn].range;
+        }
+        wind_diag_emit(diags, &(WindDiagnostic){
+            .code = code, .source = m->source ? m->source : import->source,
+            .primary = range, .message = message
+        });
+        return 1;
+    }
+    return 0;
+}
 
 static void print_help(const char *prog) {
     fprintf(stderr,
@@ -193,7 +271,8 @@ int main(int argc, char *argv[]) {
     Token *toks = wind_lex(src->text, &ntok);
     int ok = wind_parse(toks, ntok, &prog, &diags, src);
     wind_tokens_free(toks, ntok);
-    if (!ok || !wind_load_modules(&prog, src, &diags)) goto failed;
+    if (!ok || !wind_load_modules(&prog, src, &diags) ||
+        !ast_resolve_c_imports(&prog, src, &diags)) goto failed;
 
     if (mode_ast) {
         ast_dump_program(&prog, stdout);
@@ -227,33 +306,20 @@ int main(int argc, char *argv[]) {
 
     const char *links[MAX_BUILD_LINKS];
     int nlinks = build_links(&prog, links);
-#ifndef _WIN32
-    if (gc_strings) {
-        if (!build_gc_strings(nlinks, links)) goto gcc_failed;
-        goto compiled;
+    FILE *gcc_log = prog.nc_imports ? tmpfile() : NULL;
+    int built = build_program(gc_strings, nlinks, links, gcc_log);
+    if (gcc_log) {
+        rewind(gcc_log);
+        int reported = !built && report_c_build_error(&prog, &diags, gcc_log);
+        if (!reported) {
+            rewind(gcc_log);
+            char line[4096];
+            while (fgets(line, sizeof line, gcc_log)) fputs(line, stderr);
+        }
+        fclose(gcc_log);
+        if (reported) goto failed;
     }
-#endif
-
-    char gcc_cmd[1024];
-#ifdef _WIN32
-    /* -static + GC_NOT_DLL => самодостаточный .exe без libgc-1.dll/mingw-dll рядом */
-    snprintf(gcc_cmd, sizeof(gcc_cmd), "set \"LC_ALL=C\" && gcc -O2 -DGC_NOT_DLL -o app output_ast.c -static -lgc -lm -lws2_32");
-#else
-    snprintf(gcc_cmd, sizeof(gcc_cmd), "LC_ALL=C gcc -O2 -o app output_ast.c -lgc -lm");
-#endif
-
-    for (int i = 0; i < nlinks; i++) {
-        char flag[LINK_FLAG_SIZE];
-        if (!format_link(links[i], flag)) goto gcc_failed;
-        size_t used = strlen(gcc_cmd);
-        int written = snprintf(gcc_cmd + used, sizeof(gcc_cmd) - used, " %s", flag);
-        if (written < 0 || (size_t)written >= sizeof(gcc_cmd) - used) goto gcc_failed;
-    }
-
-    if (system(gcc_cmd) != 0) goto gcc_failed;
-#ifndef _WIN32
-compiled:
-#endif
+    if (!built) goto gcc_failed;
     if (diags.mode != DIAG_COMPACT && diags.mode != DIAG_SIMPLE)
         fprintf(stderr, C_CYN "Done: ./app" C_RST "\n");
     if (run_after) {

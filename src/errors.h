@@ -16,7 +16,9 @@ typedef enum { DIAG_NORMAL, DIAG_COMPACT, DIAG_LEARN, DIAG_SIMPLE, DIAG_JSON } W
 typedef enum {
     WD_LEX = 1000, WD_TERMINAL = 1001, WD_PARSE = 1002,
     WD_RETURN = 2001, WD_CODEGEN = 2002, WD_INTERPOLATION = 2003,
-    WD_MODULE = 3001, WD_IO = 3002, WD_GCC = 3003, WD_C_IMPORT = 3004
+    WD_MODULE = 3001, WD_IO = 3002, WD_GCC = 3003, WD_C_IMPORT = 3004,
+    WD_C_NOT_FOUND = 5001, WD_C_BINDING = 5002, WD_C_HEADER = 5003,
+    WD_C_LIBRARY = 5004, WD_C_SIGNATURE = 5005
 } WindDiagCode;
 
 typedef struct {
@@ -39,7 +41,7 @@ typedef struct {
     const WindSource *source;
     WindRange primary, secondary;
     const char *message, *title, *label, *secondary_label;
-    const char *note, *explanation, *suggestions;
+    const char *note, *explanation, *suggestions, *search_paths;
 } WindDiagnostic;
 
 WindSource *wind_source_open(WindDiagnostics *diags, const char *path);

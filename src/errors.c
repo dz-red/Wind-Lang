@@ -70,14 +70,25 @@ static const char *explanation(WindDiagCode code) {
                    "  A type prefix such as `str` in `str.title` is optional.\n"
                    "  If present, it must match the variable's declared type.";
         case WD_C_IMPORT:
-            return "`c.import` enables a named C binding provided by Wind, not an arbitrary C header.\n"
+            return "`c.import` enables a named C binding, not an arbitrary C header.\n"
                    "  Each binding defines the functions available in its namespace.";
+        case WD_C_NOT_FOUND:
+            return "A C library needs a Wind binding that declares its functions, types, and ownership rules.";
+        case WD_C_BINDING:
+            return "A `.windbind` file declares one header, one library, and one or more functions.";
+        case WD_C_HEADER:
+            return "GCC could not include the C header declared by the binding.";
+        case WD_C_LIBRARY:
+            return "The linker could not find the library declared by the binding.";
+        case WD_C_SIGNATURE:
+            return "The binding's C function signature must exactly match the declaration in its header.";
         default: return NULL;
     }
 }
 
 int wind_diag_explain(const char *code) {
-    const WindDiagCode codes[] = {WD_TERMINAL, WD_PARSE, WD_RETURN, WD_INTERPOLATION, WD_C_IMPORT};
+    const WindDiagCode codes[] = {WD_TERMINAL, WD_PARSE, WD_RETURN, WD_INTERPOLATION, WD_C_IMPORT,
+        WD_C_NOT_FOUND, WD_C_BINDING, WD_C_HEADER, WD_C_LIBRARY, WD_C_SIGNATURE};
     for (size_t i = 0; i < sizeof codes / sizeof *codes; i++) {
         WindDiagCode id = codes[i];
         const char *text = explanation(id);
@@ -285,6 +296,8 @@ void wind_diag_emit(WindDiagnostics *diags, const WindDiagnostic *d) {
         fprintf(stderr, "\n%sEXPLANATION%s\n  %s\n", style->cyan, style->reset, text);
         if (d->suggestions)
             fprintf(stderr, "\n%sSUGGESTIONS\n  %s%s\n", style->green, d->suggestions, style->reset);
+        if (d->search_paths)
+            fprintf(stderr, "\n%sSEARCH PATHS%s\n  %s\n", style->cyan, style->reset, d->search_paths);
         fprintf(stderr, "\n%sDETAILS%s\n  wind --explain W%04d\n", style->cyan, style->reset, d->code);
     }
     fputc('\n', stderr);

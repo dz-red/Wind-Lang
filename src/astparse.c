@@ -857,17 +857,8 @@ static void parse_c_import(P *p, Program *out) {
     expect(p, TK_GT, "'>' after C binding name");
     expect_eol(p);
 
-    const WindCModule *module = wind_c_module(name->text);
-    if (!module) {
-        char message[256];
-        snprintf(message, sizeof message, "unknown C binding `%.160s`", name->text);
-        wind_diag_emit(p->diags, &(WindDiagnostic){
-            .code = WD_C_IMPORT, .source = p->source, .primary = token_range(name),
-            .message = message, .suggestions = "SQLite is available as `c.import <sqlite>`."
-        });
-        longjmp(p->jb, 1);
-    }
-    if (!ast_add_c_import(out, module)) parse_error(p, name, "too many C imports");
+    if (!ast_add_c_import(out, name->text, p->source, token_range(name)))
+        parse_error(p, name, "too many C imports");
 }
 
 static Stmt *parse_stmt(P *p) {

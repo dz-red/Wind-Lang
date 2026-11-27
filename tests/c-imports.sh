@@ -15,7 +15,7 @@ reject() {
 }
 
 printf '%s\n' 'c.import <sqlite3>' > bad.wnd
-reject 'bad.wnd:1:11: error[W3004]: unknown C binding `sqlite3`'
+reject 'bad.wnd:1:11: error[W5001]: binding `sqlite3` not found'
 printf '%s\n' 'terminal.paste -> sqlite.version()' > bad.wnd
 reject 'error[W3004]: C binding `sqlite` is not imported'
 printf '%s\n' 'c.import <sqlite>' 'terminal.paste -> sqlite.open()' > bad.wnd

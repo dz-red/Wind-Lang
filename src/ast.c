@@ -199,6 +199,10 @@ void ast_free_program(Program *p) {
         for (int j = 0; j < im->nnames; j++) free(im->names[j]);
         free(im->names);
     }
+    for (int i = 0; i < p->nc_imports; i++) {
+        wind_c_free(p->c_imports[i].binding);
+        free(p->c_imports[i].name);
+    }
     p->nlinks = p->nimports = p->nc_imports = 0;
 }
 
@@ -216,15 +220,29 @@ int ast_has_link(const Program *p, const char *name) {
 
 int ast_has_c_import(const Program *p, const WindCModule *module) {
     for (int i = 0; i < p->nc_imports; i++)
-        if (p->c_imports[i] == module) return 1;
+        if (p->c_imports[i].binding == module) return 1;
     return 0;
 }
 
-int ast_add_c_import(Program *p, const WindCModule *module) {
-    if (ast_has_c_import(p, module)) return 1;
+int ast_add_c_import(Program *p, const char *name, const WindSource *source, WindRange range) {
+    for (int i = 0; i < p->nc_imports; i++)
+        if (!strcmp(p->c_imports[i].name, name)) return 1;
     if (p->nc_imports == WIND_MAX_C_IMPORTS) return 0;
-    p->c_imports[p->nc_imports++] = module;
+    char *copy = malloc(strlen(name) + 1);
+    if (!copy) { perror("malloc"); exit(1); }
+    strcpy(copy, name);
+    p->c_imports[p->nc_imports++] = (CImport){copy, source, range, NULL};
     return 1;
+}
+
+int ast_resolve_c_imports(Program *p, const WindSource *entry, WindDiagnostics *diags) {
+    int ok = 1;
+    for (int i = 0; i < p->nc_imports; i++) {
+        CImport *im = &p->c_imports[i];
+        im->binding = wind_c_load(im->name, entry, im->source, im->range, diags);
+        if (!im->binding) ok = 0;
+    }
+    return ok;
 }
 
 static void indent(FILE *o, int d) { for (int i = 0; i < d; i++) fputs("  ", o); }
@@ -415,7 +433,7 @@ static void dump_block(FILE *o, const Block *b, int d) {
 void ast_dump_program(const Program *p, FILE *out) {
     fprintf(out, "Program [%d top-level]:\n", p->body.n);
     for (int i = 0; i < p->nc_imports; i++)
-        fprintf(out, "  C import <%s>\n", p->c_imports[i]->name);
+        fprintf(out, "  C import <%s>\n", p->c_imports[i].name);
     for (int i = 0; i < p->nimports; i++) {
         const Import *im = &p->imports[i];
         if (im->names == NULL) {
