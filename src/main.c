@@ -8,6 +8,10 @@
 
 #include "ast.h"
 
+#ifndef WIND_RUNTIME_DIR
+#define WIND_RUNTIME_DIR "runtime"
+#endif
+
 enum { MAX_BUILD_LINKS = WIND_MAX_LINKS + WIND_MAX_C_IMPORTS, LINK_FLAG_SIZE = 256 };
 
 static int build_links(const Program *p, const char **links) {
@@ -48,11 +52,8 @@ static int format_link(const char *name, char *flag) {
 #include <sys/wait.h>
 #include <unistd.h>
 
-#ifndef WIND_RUNTIME_DIR
-#define WIND_RUNTIME_DIR "runtime"
-#endif
-
-static int build_program(int gc_strings, int nlinks, const char *const *links, FILE *log) {
+static int build_program(const Program *program, int gc_strings, int nlinks,
+                         const char *const *links, FILE *log) {
     char *wgc[] = {
         "gcc", "-O2", "-Werror=int-conversion", "-Werror=incompatible-pointer-types",
         "-Werror=return-type", "-I", WIND_RUNTIME_DIR, "-o", "app", "output_ast.c",
@@ -61,10 +62,24 @@ static int build_program(int gc_strings, int nlinks, const char *const *links, F
     };
     char *boehm[] = {"gcc", "-O2", "-o", "app", "output_ast.c", "-lgc", "-lm", NULL};
     char **base = gc_strings ? wgc : boehm;
-    char *args[sizeof wgc / sizeof *wgc + MAX_BUILD_LINKS];
+    char *args[sizeof wgc / sizeof *wgc + MAX_BUILD_LINKS + WIND_MAX_C_IMPORTS + 2];
     char flags[MAX_BUILD_LINKS][LINK_FLAG_SIZE];
+    char runtime[WIND_MAX_C_IMPORTS][sizeof WIND_RUNTIME_DIR + 64];
     size_t argc = 0;
     while (base[argc]) { args[argc] = base[argc]; argc++; }
+    int needs_include = !gc_strings;
+    for (int i = 0; i < program->nc_imports; i++) {
+        const char *source = program->c_imports[i].binding->runtime_source;
+        if (!source) continue;
+        if (needs_include) {
+            args[argc++] = "-iquote";
+            args[argc++] = WIND_RUNTIME_DIR;
+            needs_include = 0;
+        }
+        int written = snprintf(runtime[i], sizeof runtime[i], "%s/%s", WIND_RUNTIME_DIR, source);
+        if (written < 0 || (size_t)written >= sizeof runtime[i]) return 0;
+        args[argc++] = runtime[i];
+    }
     for (int i = 0; i < nlinks; i++) {
         if (!format_link(links[i], flags[i])) return 0;
         args[argc++] = flags[i];
@@ -91,9 +106,18 @@ static int build_program(int gc_strings, int nlinks, const char *const *links, F
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 #else
-static int build_program(int gc_strings, int nlinks, const char *const *links, FILE *log) {
+static int build_program(const Program *program, int gc_strings, int nlinks,
+                         const char *const *links, FILE *log) {
     (void)gc_strings;
     char cmd[1024] = "set \"LC_ALL=C\" && gcc -O2 -DGC_NOT_DLL -o app output_ast.c -static -lgc -lm -lws2_32";
+    for (int i = 0; i < program->nc_imports; i++) {
+        const char *source = program->c_imports[i].binding->runtime_source;
+        if (!source) continue;
+        size_t used = strlen(cmd);
+        int written = snprintf(cmd + used, sizeof(cmd) - used, " -iquote \"%s\" \"%s/%s\"",
+                               WIND_RUNTIME_DIR, WIND_RUNTIME_DIR, source);
+        if (written < 0 || (size_t)written >= sizeof(cmd) - used) return 0;
+    }
     for (int i = 0; i < nlinks; i++) {
         char flag[LINK_FLAG_SIZE];
         if (!format_link(links[i], flag)) return 0;
@@ -307,7 +331,7 @@ int main(int argc, char *argv[]) {
     const char *links[MAX_BUILD_LINKS];
     int nlinks = build_links(&prog, links);
     FILE *gcc_log = prog.nc_imports ? tmpfile() : NULL;
-    int built = build_program(gc_strings, nlinks, links, gcc_log);
+    int built = build_program(&prog, gc_strings, nlinks, links, gcc_log);
     if (gcc_log) {
         rewind(gcc_log);
         int reported = !built && report_c_build_error(&prog, &diags, gcc_log);

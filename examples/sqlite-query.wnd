@@ -1,0 +1,17 @@
+c.import <sqlite>
+
+var db = sqlite.open(":memory:")
+sqlite.exec(db, "CREATE TABLE items (name TEXT, quantity INTEGER)")
+
+var insert = sqlite.prepare(db, "INSERT INTO items VALUES (?, ?)")
+sqlite.bind_text(insert, 1, "Wind")
+sqlite.bind_int(insert, 2, 42)
+sqlite.step(insert)
+sqlite.finalize(insert)
+
+var query = sqlite.prepare(db, "SELECT name, quantity FROM items")
+while sqlite.step(query)
+    terminal.paste -> "${sqlite.column_text(query, 0)}: ${sqlite.column_int(query, 1)}"
+end
+sqlite.finalize(query)
+sqlite.close(db)

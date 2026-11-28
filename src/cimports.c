@@ -8,6 +8,7 @@
 
 const WindCModule wind_c_modules[] = {
     {.name = "sqlite", .header = "sqlite3.h", .library = "sqlite3",
+     .runtime_header = "sqlite_ffi.h", .runtime_source = "sqlite_ffi.c",
      .functions = sqlite_functions, .legacy_link = 1},
     {0}
 };
@@ -26,15 +27,18 @@ const WindCFunction *wind_c_function(const WindCModule *module, const char *name
 
 static const char *c_type(TokenKind type) {
     switch (type) {
-        case TK_KW_INT: return "int";
+        case TK_KW_INT: case TK_KW_BOOL: return "int";
         case TK_KW_FRAC: return "double";
         case TK_KW_STR: return "const char *";
+        case TK_C_SQLITE_DB: return "WindSqliteDb";
+        case TK_C_SQLITE_STMT: return "WindSqliteStmt";
         default: return "void";
     }
 }
 
 void wind_c_emit_checks(FILE *out, const WindCModule *module, int import_index) {
     fprintf(out, "#line 1 \"wind-ffi-header-%d\"\n#include <%s>\n", import_index, module->header);
+    if (module->runtime_header) fprintf(out, "#include \"%s\"\n", module->runtime_header);
     fputs("#pragma GCC diagnostic push\n"
           "#pragma GCC diagnostic error \"-Wincompatible-pointer-types\"\n", out);
     for (int i = 0; module->functions[i].name; i++) {
@@ -151,8 +155,8 @@ static int parse_function(BindingParser *p, WindCModule *m, int *nfunc) {
     if (p->t->kind != TK_RPAREN) {
         for (;;) {
             Token *type = p->t++;
-            if (type->kind != TK_KW_INT && type->kind != TK_KW_FRAC)
-                return binding_error(p, type, "C parameters must have type `int` or `frac`");
+            if (type->kind != TK_KW_INT && type->kind != TK_KW_FRAC && type->kind != TK_KW_STR)
+                return binding_error(p, type, "C parameters must have type `int`, `frac`, or `str`");
             if (f.nargs == WIND_C_MAX_PARAMS)
                 return binding_error(p, type, "too many C parameters");
             if (!expect(p, TK_DOT, "expected '.' between parameter type and name")) return 0;
@@ -162,6 +166,11 @@ static int parse_function(BindingParser *p, WindCModule *m, int *nfunc) {
                 if (!strcmp(names[i], arg->text)) return binding_error(p, arg, "duplicate parameter name");
             names[f.nargs] = arg->text;
             f.args[f.nargs++] = type->kind;
+            if (type->kind == TK_KW_STR) {
+                if (!word(p->t, "borrow_cstr"))
+                    return binding_error(p, p->t, "`str` parameters require `borrow_cstr`");
+                p->t++;
+            }
             if (p->t->kind != TK_COMMA) break;
             p->t++;
         }

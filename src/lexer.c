@@ -453,6 +453,8 @@ const char *wind_token_kind_name(TokenKind kind) {
         case TK_KW_USE: return "KW_USE";
         case TK_KW_TAKE: return "KW_TAKE";
         case TK_KW_FROM: return "KW_FROM";
+        case TK_C_SQLITE_DB: return "SQLITE_DB";
+        case TK_C_SQLITE_STMT: return "SQLITE_STMT";
     }
     return "?";
 }

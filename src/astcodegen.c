@@ -6,7 +6,9 @@
 
 #include "astcodegen.h"
 
-typedef enum { WT_INT, WT_FRAC, WT_STR, WT_VOID, WT_BOOL, WT_JSON, WT_UNKNOWN } WType;
+typedef enum {
+    WT_INT, WT_FRAC, WT_STR, WT_VOID, WT_BOOL, WT_JSON, WT_SQLITE_DB, WT_SQLITE_STMT, WT_UNKNOWN
+} WType;
 
 typedef enum { CK_SCALAR, CK_ARRAY, CK_LIST, CK_DICT } CKind;
 typedef struct { CKind ck; WType elem; WType key; } VType;  /* elem: тип элемента/значения; key: ключ dict */
@@ -21,6 +23,7 @@ static const Stmt *cg_stmt, *cg_func;
 static const WindSource *cg_source;
 static const Program *cg_program;
 static WindRange cg_interp_range;
+static int cg_has_handles;
 
 static Sym      g_glob[256]; static int g_nglob;
 static Sym      g_loc[256];  static int g_nloc;     /* сбрасывается на каждую функцию/main */
@@ -87,6 +90,8 @@ static WType wt_base(TokenKind t) {
         case TK_KW_STR:  return WT_STR;
         case TK_KW_BOOL: return WT_BOOL;
         case TK_KW_VOID: return WT_VOID;
+        case TK_C_SQLITE_DB: return WT_SQLITE_DB;
+        case TK_C_SQLITE_STMT: return WT_SQLITE_STMT;
         default:         return WT_UNKNOWN;
     }
 }
@@ -98,6 +103,8 @@ static const char *wind_type_name(WType t) {
         case WT_BOOL: return "bool";
         case WT_JSON: return "json";
         case WT_VOID: return "void";
+        case WT_SQLITE_DB: return "sqlite.connection";
+        case WT_SQLITE_STMT: return "sqlite.statement";
         default:      return "unknown";
     }
 }
@@ -130,6 +137,8 @@ static const char *ctype(WType t) {
         case WT_STR:  return "char*";
         case WT_JSON: return "_wj*";
         case WT_VOID: return "void";
+        case WT_SQLITE_DB: return "WindSqliteDb";
+        case WT_SQLITE_STMT: return "WindSqliteStmt";
         default: cg_fail("unknown type in codegen"); return "?";
     }
 }
@@ -143,6 +152,14 @@ static const char *list_suffix(WType t) {
 }
 
 static WType infer(const Expr *e);
+
+static int handle_type(WType type) {
+    return type == WT_SQLITE_DB || type == WT_SQLITE_STMT;
+}
+
+static void reject_handle(const Expr *e, const char *context) {
+    if (cg_has_handles && handle_type(infer(e))) cg_fail("C handles cannot be used %s", context);
+}
 
 static _Noreturn void c_call_error(const Expr *callee, const char *message, const char *suggestions) {
     WindRange range = {.line = callee->line, .col = callee->col};
@@ -189,7 +206,7 @@ static const WindCFunction *legacy_c_function(const char *name) {
     for (const WindCModule *m = wind_c_modules; m->name; m++) {
         if (!legacy_c_link(m)) continue;
         for (const WindCFunction *f = m->functions; f->name; f++)
-            if (!strcmp(f->symbol, name)) return f;
+            if (f->legacy_symbol && !strcmp(f->symbol, name)) return f;
     }
     return NULL;
 }
@@ -523,12 +540,15 @@ static void emit_expr(FILE *o, const Expr *e) {
             break;
         case EX_GROUP: fputc('(', o); emit_expr(o, e->as.group.inner); fputc(')', o); break;
         case EX_UNARY:
+            reject_handle(e->as.unary.e, "with operators");
             fputc('(', o);
             fputs(e->as.unary.op == TK_MINUS ? "-" : "", o);
             emit_expr(o, e->as.unary.e);
             fputc(')', o);
             break;
         case EX_BINARY: {
+            reject_handle(e->as.binary.l, "with operators");
+            reject_handle(e->as.binary.r, "with operators");
             TokenKind op = e->as.binary.op;
             if (op == TK_PLUS && infer(e) == WT_STR) {
                 fputs("wstr_cat(", o);
@@ -559,6 +579,8 @@ static void emit_expr(FILE *o, const Expr *e) {
                     emit_c_call(o, e, binding);
                     break;
                 }
+                for (int i = 0; i < e->as.call.nargs; i++)
+                    reject_handle(e->as.call.args[i], "as arguments to non-binding functions");
                 const Expr *obj = c->as.dot.obj;
                 const char *m = c->as.dot.field;
             if (obj->kind == EX_IDENT && !strcmp(obj->as.ident, "time")) {
@@ -670,6 +692,8 @@ static void emit_expr(FILE *o, const Expr *e) {
             if (c->kind != EX_IDENT)
                 cg_fail("call supported only by function name or list method");
             const char *fn = c->as.ident;
+            for (int i = 0; i < e->as.call.nargs; i++)
+                reject_handle(e->as.call.args[i], "as arguments to non-binding functions");
             if (!strcmp(fn, "len") && e->as.call.nargs == 1) {
                 if (infer(e->as.call.args[0]) == WT_STR)
                     fputs("(int)strlen(", o);
@@ -950,6 +974,7 @@ static void emit_local_decl(FILE *o, const Stmt *s, int ind) {
     if (dt->kind == DT_INFER)        t = infer(s->as.decl.init);
     else if (dt->kind == DT_SCALAR)  t = wt_base(dt->base);
     else cg_fail("unknown declaration kind");
+    if (dt->kind != DT_INFER) reject_handle(s->as.decl.init, "in a scalar declaration; use var");
     if (t == WT_VOID || t == WT_UNKNOWN) cg_fail("cannot infer type of variable '%s'", s->as.decl.name);
     /* Повторное объявление того же типа — присваивание. */
     if (local_declared(s->as.decl.name)) {
@@ -1029,6 +1054,12 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
             break;
         case ST_ASSIGN: {
             const Expr *tgt = s->as.assign.target;
+            if (cg_has_handles) {
+                WType target = infer(tgt), value = infer(s->as.assign.value);
+                if ((handle_type(target) || handle_type(value)) &&
+                    (target != value || s->as.assign.op != TK_ASSIGN))
+                    cg_fail("C handle assignment requires '=' and matching handle types");
+            }
             if (tgt->kind == EX_INDEX) {
                 VType cv = coll_vtype(tgt->as.index.coll);
                 if (cv.ck == CK_LIST) {
@@ -1083,6 +1114,7 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
         }
         case ST_IF: {
             for (int i = 0; i < s->as.iff.nclauses; i++) {
+                reject_handle(s->as.iff.clauses[i].cond, "as conditions");
                 indent(o, ind);
                 fputs(i == 0 ? "if (" : "else if (", o);
                 emit_full_expr(o, s->as.iff.clauses[i].cond);
@@ -1098,6 +1130,7 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
             break;
         }
         case ST_WHILE:
+            reject_handle(s->as.whilel.cond, "as conditions");
             indent(o, ind); fputs("while (", o);
             emit_full_expr(o, s->as.whilel.cond); fputs(") {\n", o);
             if (g_gc_strings && needs_temps(s->as.whilel.cond)) emit_gc_checkpoint(o, ind + 1);
@@ -1378,6 +1411,9 @@ int wind_codegen(const Program *p, FILE *out, WindDiagnostics *diags, int gc_str
     cg_stmt = cg_func = NULL;
     cg_source = NULL;
     cg_interp_range = (WindRange){0};
+    cg_has_handles = 0;
+    for (int i = 0; i < p->nc_imports; i++)
+        if (p->c_imports[i].binding->runtime_source) cg_has_handles = 1;
     unsigned previous = diags->count;
     g_nglob = g_nloc = g_nfunc = g_rep_id = 0;
     g_gc_strings = gc_strings;

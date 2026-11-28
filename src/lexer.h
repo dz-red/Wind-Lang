@@ -80,6 +80,8 @@ typedef enum {
     TK_OR,
     TK_ARROW,
     TK_BAD,
+    TK_C_SQLITE_DB,
+    TK_C_SQLITE_STMT,
 } TokenKind;
 
 typedef struct {

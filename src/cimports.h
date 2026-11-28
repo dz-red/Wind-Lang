@@ -10,6 +10,7 @@ typedef struct {
     const char *name, *symbol;
     TokenKind result;
     int copy_string;
+    int legacy_symbol;
     int nargs;
     TokenKind args[WIND_C_MAX_PARAMS];
     WindRange range;
@@ -17,6 +18,7 @@ typedef struct {
 
 typedef struct {
     const char *name, *header, *library;
+    const char *runtime_header, *runtime_source;
     const WindCFunction *functions;
     int legacy_link;
     const WindSource *source;
