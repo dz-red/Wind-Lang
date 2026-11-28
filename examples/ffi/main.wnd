@@ -1,4 +1,4 @@
 c.import <math>
 c.import <zlib>
 
-terminal.paste -> "2^8 = ${math.pow(2,0, 8,0)}, zlib ${zlib.version()}"
+terminal.paste -> "2^8 = ${math.pow(2,0, 8,0)}, zlib ${zlib.zlibVersion()}"

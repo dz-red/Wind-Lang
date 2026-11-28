@@ -189,8 +189,12 @@ static const WindCFunction *imported_c_function(const Expr *callee) {
         snprintf(suggestion, sizeof suggestion, "Add `c.import <%s>` at the top level.", module->name);
         c_call_error(callee, message, suggestion);
     }
-    const WindCFunction *function = wind_c_function(module, callee->as.dot.field);
+    WindRange range = cg_interp_range.line ? cg_interp_range :
+        (WindRange){.line = callee->line, .col = callee->col};
+    unsigned before = cg_diags->count;
+    const WindCFunction *function = wind_c_resolve(module, callee->as.dot.field, cg_diags, cg_source, range);
     if (function) return function;
+    if (cg_diags->count != before) longjmp(cg_jb, 1);
     snprintf(message, sizeof message, "C binding `%s` has no function `%.140s`",
              module->name, callee->as.dot.field);
     snprintf(suggestion, sizeof suggestion, "This binding provides `%s.%s()`.",
@@ -463,6 +467,9 @@ static _Noreturn void interpolation_error(const Expr *expr, WType type) {
 }
 
 static void emit_c_call(FILE *o, const Expr *e, const WindCFunction *binding) {
+    /* Вложенный вызов может расширить таблицу привязки. */
+    WindCFunction signature = *binding;
+    binding = &signature;
     const Expr *callee = e->as.call.callee;
     char name[160], message[256];
     if (callee->kind == EX_DOT)
@@ -1460,7 +1467,7 @@ int wind_codegen(const Program *p, FILE *out, WindDiagnostics *diags, int gc_str
         if (!ast_has_c_import(p, m) && legacy_c_link(m))
             fprintf(out, "#include <%s>\n", m->header);
     for (int i = 0; i < p->nc_imports; i++)
-        wind_c_emit_checks(out, p->c_imports[i].binding, i);
+        wind_c_emit_header(out, p->c_imports[i].binding, i);
 
     if (g_gc_strings) {
         fputs("#include \"strings_gc.h\"\n#include \"collections_gc.h\"\n"
@@ -1817,5 +1824,7 @@ int wind_codegen(const Program *p, FILE *out, WindDiagnostics *diags, int gc_str
     }
     if (g_gc_strings) fputs("    wind_str_destroy();\n", out);
     indent(out, 1); fputs("return 0;\n}\n", out);
+    for (int i = 0; i < p->nc_imports; i++)
+        wind_c_emit_checks(out, p->c_imports[i].binding, i);
     return diags->count == previous;
 }

@@ -6,6 +6,9 @@
 
 enum { WIND_C_MAX_PARAMS = 16 };
 
+typedef struct WindCHeader WindCHeader;
+typedef struct WindCOwnership WindCOwnership;
+
 typedef struct {
     const char *name, *symbol;
     TokenKind result;
@@ -23,15 +26,21 @@ typedef struct {
     int legacy_link;
     const WindSource *source;
     WindRange header_range, library_range;
+    int auto_header;
+    WindCHeader *parsed_header;
+    WindCOwnership *ownership;
 } WindCModule;
 
 extern const WindCModule wind_c_modules[];
 
 const WindCModule *wind_c_module(const char *name);
 const WindCFunction *wind_c_function(const WindCModule *module, const char *name);
+const WindCFunction *wind_c_resolve(const WindCModule *module, const char *name,
+                                   WindDiagnostics *diags, const WindSource *source, WindRange range);
 const WindCModule *wind_c_load(const char *name, const WindSource *entry,
                                const WindSource *source, WindRange range, WindDiagnostics *diags);
 void wind_c_free(const WindCModule *module);
+void wind_c_emit_header(FILE *out, const WindCModule *module, int import_index);
 void wind_c_emit_checks(FILE *out, const WindCModule *module, int import_index);
 
 #endif

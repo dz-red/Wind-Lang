@@ -4,7 +4,15 @@
 #include <string.h>
 
 #include "cimports.h"
+#include "cheader.h"
 #include "../bindings/sqlite.inc"
+
+struct WindCOwnership {
+    char *symbol;
+    unsigned borrowed;
+    int copy;
+    WindCOwnership *next;
+};
 
 const WindCModule wind_c_modules[] = {
     {.name = "sqlite", .header = "sqlite3.h", .library = "sqlite3",
@@ -36,9 +44,14 @@ static const char *c_type(TokenKind type) {
     }
 }
 
-void wind_c_emit_checks(FILE *out, const WindCModule *module, int import_index) {
+void wind_c_emit_header(FILE *out, const WindCModule *module, int import_index) {
     fprintf(out, "#line 1 \"wind-ffi-header-%d\"\n#include <%s>\n", import_index, module->header);
     if (module->runtime_header) fprintf(out, "#include \"%s\"\n", module->runtime_header);
+    fputs("#line 1 \"output_ast.c\"\n", out);
+}
+
+void wind_c_emit_checks(FILE *out, const WindCModule *module, int import_index) {
+    if (!module->functions[0].name) return;
     fputs("#pragma GCC diagnostic push\n"
           "#pragma GCC diagnostic error \"-Wincompatible-pointer-types\"\n", out);
     for (int i = 0; module->functions[i].name; i++) {
@@ -67,8 +80,95 @@ static char *copy_n(const char *s, size_t n) {
     return r;
 }
 
+static const WindCFunction *add_function(WindCModule *module, WindCFunction f) {
+    size_t n = 0;
+    while (module->functions[n].name) n++;
+    WindCFunction *functions = checked(realloc((void *)module->functions, (n + 2) * sizeof f));
+    functions[n] = f;
+    functions[n + 1] = (WindCFunction){0};
+    module->functions = functions;
+    return &functions[n];
+}
+
+static WindCOwnership *ownership(const WindCModule *module, const char *symbol) {
+    for (WindCOwnership *rule = module->ownership; rule; rule = rule->next)
+        if (!strcmp(rule->symbol, symbol)) return rule;
+    return NULL;
+}
+
+const WindCFunction *wind_c_resolve(const WindCModule *module, const char *name,
+                                   WindDiagnostics *diags, const WindSource *source, WindRange range) {
+    const WindCFunction *declared = wind_c_function(module, name);
+    if (declared || !module->auto_header) return declared;
+    WindCModule *loaded = (WindCModule *)module;
+    char message[384], suggestion[256], detail[384] = {0};
+    if (!loaded->parsed_header) {
+        WindCHeaderStatus status = wind_cheader_open(module->header, &loaded->parsed_header, detail, sizeof detail);
+        if (status != C_HEADER_OK) {
+            const char *reason = status == C_HEADER_UNAVAILABLE ? "automatic bindings require libclang" :
+                status == C_HEADER_NOT_FOUND ? "C header not found" : "cannot read C declarations";
+            snprintf(message, sizeof message, "%s for binding `%.100s`: <%s>", reason, module->name, module->header);
+            wind_diag_emit(diags, &(WindDiagnostic){
+                .code = status == C_HEADER_NOT_FOUND ? WD_C_HEADER : WD_C_HEADER_DISCOVERY,
+                .source = module->source, .primary = module->header_range, .message = message,
+                .note = *detail ? detail : NULL,
+                .suggestions = status == C_HEADER_UNAVAILABLE ?
+                    "Install libclang or provide explicit `func` declarations in the binding." : NULL
+            });
+            return NULL;
+        }
+    }
+    WindCFunction f = {0};
+    WindCHeaderStatus status = wind_cheader_function(loaded->parsed_header, name, &f);
+    const WindCOwnership *rule = ownership(module, name);
+    const char *hint = NULL;
+    if (status == C_HEADER_NO_FUNCTION) {
+        snprintf(message, sizeof message, "C header <%s> does not declare function `%.100s`", module->header, name);
+    } else if (status != C_HEADER_OK) {
+        snprintf(message, sizeof message, "C function `%.150s` has a signature Wind cannot import automatically",
+                 name);
+    } else if (f.result == TK_KW_STR && (!rule || !rule->copy)) {
+        snprintf(message, sizeof message, "string result from C function `%.150s` needs `copy_cstr`", name);
+        snprintf(suggestion, sizeof suggestion, "Add `copy_cstr %.150s` if it returns a borrowed C string.", name);
+        hint = suggestion;
+    } else {
+        unsigned strings = 0;
+        for (int i = 0; i < f.nargs; i++) {
+            if (f.args[i] != TK_KW_STR) continue;
+            strings |= 1u << i;
+            if (rule && (rule->borrowed & (1u << i))) continue;
+            snprintf(message, sizeof message, "argument %d of C function `%.120s` needs `borrow_cstr`", i + 1, name);
+            snprintf(suggestion, sizeof suggestion, "Add `borrow_cstr %.120s %d` if C does not retain the pointer.",
+                     name, i + 1);
+            hint = suggestion;
+            break;
+        }
+        if (!hint && rule && ((rule->borrowed & ~strings) || (rule->copy && f.result != TK_KW_STR))) {
+            snprintf(message, sizeof message, "string ownership rule does not match C function `%.140s`", name);
+        } else if (!hint) {
+            f.name = copy_n(name, strlen(name));
+            f.symbol = copy_n(name, strlen(name));
+            f.copy_string = f.result == TK_KW_STR;
+            f.range = module->header_range;
+            return add_function(loaded, f);
+        }
+    }
+    wind_diag_emit(diags, &(WindDiagnostic){
+        .code = WD_C_HEADER_DISCOVERY, .source = source, .primary = range,
+        .message = message, .suggestions = hint
+    });
+    return NULL;
+}
+
 void wind_c_free(const WindCModule *module) {
     if (!module || !module->source) return;
+    wind_cheader_free(module->parsed_header);
+    for (WindCOwnership *rule = module->ownership; rule;) {
+        WindCOwnership *next = rule->next;
+        free(rule->symbol);
+        free(rule);
+        rule = next;
+    }
     for (const WindCFunction *f = module->functions; f->name; f++) {
         free((void *)f->name);
         free((void *)f->symbol);
@@ -146,7 +246,7 @@ static int parse_header(BindingParser *p, WindCModule *m) {
     return end_line(p);
 }
 
-static int parse_function(BindingParser *p, WindCModule *m, int *nfunc) {
+static int parse_function(BindingParser *p, WindCModule *m) {
     Token *name = expect(p, TK_IDENT, "expected binding function name");
     if (!name || !expect(p, TK_LPAREN, "expected '(' after binding function name")) return 0;
     if (wind_c_function(m, name->text)) return binding_error(p, name, "duplicate binding function");
@@ -194,10 +294,34 @@ static int parse_function(BindingParser *p, WindCModule *m, int *nfunc) {
     f.name = copy_n(name->text, strlen(name->text));
     f.symbol = copy_n(symbol->text, strlen(symbol->text));
     f.range = token_range(symbol);
-    WindCFunction *functions = checked(realloc((void *)m->functions, ((size_t)*nfunc + 2) * sizeof f));
-    functions[(*nfunc)++] = f;
-    functions[*nfunc] = (WindCFunction){0};
-    m->functions = functions;
+    add_function(m, f);
+    return 1;
+}
+
+static int parse_ownership(BindingParser *p, WindCModule *module, int copy) {
+    Token *name = expect(p, TK_IDENT, "expected C function name for string ownership rule");
+    if (!name) return 0;
+    unsigned bit = 0;
+    if (!copy) {
+        Token *index = expect(p, TK_INT_LIT, "expected 1-based argument number after function name");
+        if (!index) return 0;
+        if (index->ival < 1 || index->ival > WIND_C_MAX_PARAMS)
+            return binding_error(p, index, "argument number is out of range");
+        bit = 1u << (index->ival - 1);
+    }
+    if (!end_line(p)) return 0;
+    WindCOwnership *rule = ownership(module, name->text);
+    if (rule && ((copy && rule->copy) || (bit & rule->borrowed)))
+        return binding_error(p, name, "duplicate string ownership rule");
+    if (!rule) {
+        rule = checked(calloc(1, sizeof *rule));
+        rule->symbol = copy_n(name->text, strlen(name->text));
+        rule->next = module->ownership;
+        module->ownership = rule;
+    }
+    rule->copy |= copy;
+    rule->borrowed |= bit;
+    module->auto_header = 1;
     return 1;
 }
 
@@ -206,7 +330,7 @@ static const WindCModule *parse_binding(const char *name, const WindSource *sour
     m->name = name;
     m->source = source;
     m->functions = checked(calloc(1, sizeof *m->functions));
-    int count, nfunc = 0, ok = 1;
+    int count, ok = 1;
     Token *tokens = wind_lex(source->text, &count);
     BindingParser p = {tokens, source, diags};
     while (ok && p.t->kind != TK_EOF) {
@@ -227,13 +351,19 @@ static const WindCModule *parse_binding(const char *name, const WindSource *sour
             m->library_range = token_range(lib);
             ok = end_line(&p);
         } else if (first->kind == TK_KW_FUNC) {
-            ok = parse_function(&p, m, &nfunc);
+            ok = parse_function(&p, m);
+        } else if (word(first, "copy_cstr") || word(first, "borrow_cstr")) {
+            ok = parse_ownership(&p, m, word(first, "copy_cstr"));
+        } else if (word(first, "auto")) {
+            m->auto_header = 1;
+            ok = end_line(&p);
         } else {
-            ok = binding_error(&p, first, "expected `header`, `link`, or `func`");
+            ok = binding_error(&p, first, "expected `header`, `link`, `func`, `auto`, or an ownership rule");
         }
     }
-    if (ok && (!m->header || !m->library || !nfunc))
-        ok = binding_error(&p, p.t, "a binding requires `header`, `link`, and at least one `func`");
+    if (ok && (!m->header || !m->library))
+        ok = binding_error(&p, p.t, "a binding requires `header` and `link`");
+    if (ok && !m->functions[0].name) m->auto_header = 1;
     wind_tokens_free(tokens, count);
     if (ok) return m;
     wind_c_free(m);

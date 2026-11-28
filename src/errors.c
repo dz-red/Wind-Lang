@@ -75,20 +75,23 @@ static const char *explanation(WindDiagCode code) {
         case WD_C_NOT_FOUND:
             return "A C library needs a Wind binding that declares its functions, types, and ownership rules.";
         case WD_C_BINDING:
-            return "A `.windbind` file declares one header, one library, and one or more functions.";
+            return "A `.windbind` file declares a header and a library. Functions may be discovered from the header.";
         case WD_C_HEADER:
             return "GCC could not include the C header declared by the binding.";
         case WD_C_LIBRARY:
             return "The linker could not find the library declared by the binding.";
         case WD_C_SIGNATURE:
             return "The binding's C function signature must exactly match the declaration in its header.";
+        case WD_C_HEADER_DISCOVERY:
+            return "Automatic C bindings use libclang to read function declarations. Wind supports int,\n"
+                   "  double, void, and const char pointers with explicit string ownership rules.";
         default: return NULL;
     }
 }
 
 int wind_diag_explain(const char *code) {
     const WindDiagCode codes[] = {WD_TERMINAL, WD_PARSE, WD_RETURN, WD_INTERPOLATION, WD_C_IMPORT,
-        WD_C_NOT_FOUND, WD_C_BINDING, WD_C_HEADER, WD_C_LIBRARY, WD_C_SIGNATURE};
+        WD_C_NOT_FOUND, WD_C_BINDING, WD_C_HEADER, WD_C_LIBRARY, WD_C_SIGNATURE, WD_C_HEADER_DISCOVERY};
     for (size_t i = 0; i < sizeof codes / sizeof *codes; i++) {
         WindDiagCode id = codes[i];
         const char *text = explanation(id);

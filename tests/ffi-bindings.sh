@@ -2,14 +2,24 @@
 set -eu
 
 wind=$(realpath "${1:-./wind}")
-examples=$(dirname "$(realpath "$0")")/../examples/ffi
 tmp=$(mktemp -d)
 trap 'find "$tmp" -type f -delete; find "$tmp" -depth -type d -exec rmdir {} +' EXIT
 cd "$tmp"
 export XDG_DATA_HOME="$tmp/user share"
 mkdir -p project/bindings "$XDG_DATA_HOME/wind/bindings"
-cp "$examples/bindings/math.windbind" project/bindings/
-cp "$examples/bindings/zlib.windbind" "$XDG_DATA_HOME/wind/bindings/"
+cat > project/bindings/math.windbind <<'EOF'
+header <math.h>
+link "m"
+func sqrt(frac.x) -> frac = sqrt
+func pow(frac.x, frac.y) -> frac = pow
+func sin(frac.x) -> frac = sin
+func cos(frac.x) -> frac = cos
+EOF
+cat > "$XDG_DATA_HOME/wind/bindings/zlib.windbind" <<'EOF'
+header <zlib.h>
+link "z"
+func version() -> str = zlibVersion copy_cstr
+EOF
 
 reject() {
     status=0
@@ -55,7 +65,7 @@ grep -Fx '  /usr/share/wind/bindings/wind_ffi_missing.windbind' error
 grep -F 'ownership rules' explain
 
 mkdir -p "$tmp/home/.local/share/wind/bindings"
-cp "$examples/bindings/math.windbind" "$tmp/home/.local/share/wind/bindings/home_math.windbind"
+cp project/bindings/math.windbind "$tmp/home/.local/share/wind/bindings/home_math.windbind"
 cat > project/helper.wnd <<'EOF'
 c.import <home_math>
 func result() -> frac
