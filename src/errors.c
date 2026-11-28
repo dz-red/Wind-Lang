@@ -83,8 +83,8 @@ static const char *explanation(WindDiagCode code) {
         case WD_C_SIGNATURE:
             return "The binding's C function signature must exactly match the declaration in its header.";
         case WD_C_HEADER_DISCOVERY:
-            return "Automatic C bindings use libclang to read function declarations. Wind supports int,\n"
-                   "  double, void, and const char pointers with explicit string ownership rules.";
+            return "Automatic C bindings use libclang to read function declarations. String pointers,\n"
+                   "  numeric buffers and synchronous callbacks require explicit borrowing or copying rules.";
         default: return NULL;
     }
 }

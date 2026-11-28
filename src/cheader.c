@@ -140,6 +140,12 @@ static TokenKind wind_type(CXType type) {
         case CXType_Void: return TK_KW_VOID;
         case CXType_Pointer: {
             CXType pointee = api.getCanonicalType(api.getPointeeType(type));
+            if (api.isVolatileQualifiedType(pointee)) break;
+            if (pointee.kind == CXType_Int)
+                return api.isConstQualifiedType(pointee) ? TK_C_CONST_INT_BUFFER : TK_C_INT_BUFFER;
+            if (pointee.kind == CXType_Double)
+                return api.isConstQualifiedType(pointee) ? TK_C_CONST_FRAC_BUFFER : TK_C_FRAC_BUFFER;
+            if (pointee.kind == CXType_FunctionProto) return TK_C_CALLBACK;
             if ((pointee.kind == CXType_Char_S || pointee.kind == CXType_Char_U) &&
                 api.isConstQualifiedType(pointee) && !api.isVolatileQualifiedType(pointee)) return TK_KW_STR;
             break;
@@ -147,6 +153,22 @@ static TokenKind wind_type(CXType type) {
         default: break;
     }
     return TK_BAD;
+}
+
+static int scalar_signature(CXType type, WindCCallback *signature) {
+    if (type.kind != CXType_FunctionProto || api.isFunctionTypeVariadic(type)) return 0;
+    enum CXCallingConv convention = api.getFunctionTypeCallingConv(type);
+    if (convention != CXCallingConv_C && convention != CXCallingConv_Default) return 0;
+    signature->nargs = api.getNumArgTypes(type);
+    if (signature->nargs < 0 || signature->nargs > WIND_C_MAX_PARAMS) return 0;
+    signature->result = wind_type(api.getResultType(type));
+    if (signature->result != TK_KW_INT && signature->result != TK_KW_FRAC &&
+        signature->result != TK_KW_VOID) return 0;
+    for (int i = 0; i < signature->nargs; i++) {
+        signature->args[i] = wind_type(api.getArgType(type, (unsigned)i));
+        if (signature->args[i] != TK_KW_INT && signature->args[i] != TK_KW_FRAC) return 0;
+    }
+    return 1;
 }
 
 typedef struct {
@@ -176,10 +198,15 @@ static enum CXChildVisitResult visit(CXCursor cursor, CXCursor parent, CXClientD
     f->nargs = api.getNumArgTypes(type);
     if (f->nargs < 0 || f->nargs > WIND_C_MAX_PARAMS) return CXChildVisit_Break;
     f->result = wind_type(api.getResultType(type));
-    if (f->result == TK_BAD) return CXChildVisit_Break;
+    if (f->result == TK_BAD || f->result == TK_C_CALLBACK ||
+        wind_c_buffer_element(f->result) != TK_BAD) return CXChildVisit_Break;
     for (int i = 0; i < f->nargs; i++) {
-        f->args[i] = wind_type(api.getArgType(type, (unsigned)i));
+        CXType arg = api.getCanonicalType(api.getArgType(type, (unsigned)i));
+        f->args[i] = wind_type(arg);
         if (f->args[i] == TK_BAD || f->args[i] == TK_KW_VOID) return CXChildVisit_Break;
+        if (f->args[i] == TK_C_CALLBACK &&
+            !scalar_signature(api.getCanonicalType(api.getPointeeType(arg)), &f->callbacks[i]))
+            return CXChildVisit_Break;
     }
     lookup->status = C_HEADER_OK;
     return CXChildVisit_Break;

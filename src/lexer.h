@@ -82,6 +82,11 @@ typedef enum {
     TK_BAD,
     TK_C_SQLITE_DB,
     TK_C_SQLITE_STMT,
+    TK_C_INT_BUFFER,
+    TK_C_CONST_INT_BUFFER,
+    TK_C_FRAC_BUFFER,
+    TK_C_CONST_FRAC_BUFFER,
+    TK_C_CALLBACK,
 } TokenKind;
 
 typedef struct {

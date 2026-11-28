@@ -24,6 +24,7 @@ static const WindSource *cg_source;
 static const Program *cg_program;
 static WindRange cg_interp_range;
 static int cg_has_handles;
+static int cg_has_callbacks;
 
 static Sym      g_glob[256]; static int g_nglob;
 static Sym      g_loc[256];  static int g_nloc;     /* сбрасывается на каждую функцию/main */
@@ -466,6 +467,53 @@ static _Noreturn void interpolation_error(const Expr *expr, WType type) {
     longjmp(cg_jb, 1);
 }
 
+static int callback_index(const Expr *arg, const WindCCallback *signature) {
+    if (arg->kind != EX_IDENT || var_vtype(arg->as.ident).elem != WT_UNKNOWN) return -1;
+    int index = 0;
+    for (int i = 0; i < cg_program->body.n; i++) {
+        const Stmt *s = cg_program->body.items[i];
+        if (s->kind != ST_FUNC) continue;
+        int id = index++;
+        if (strcmp(s->as.func.name, arg->as.ident)) continue;
+        if (s->as.func.ret != signature->result || s->as.func.nparams != signature->nargs) return -1;
+        for (int j = 0; j < signature->nargs; j++)
+            if (s->as.func.params[j].type != signature->args[j]) return -1;
+        return id;
+    }
+    return -1;
+}
+
+static int scalar_callback(const Stmt *s) {
+    WType result = wt_base(s->as.func.ret);
+    if (result != WT_INT && result != WT_FRAC && result != WT_VOID) return 0;
+    for (int i = 0; i < s->as.func.nparams; i++) {
+        WType arg = wt_base(s->as.func.params[i].type);
+        if (arg != WT_INT && arg != WT_FRAC) return 0;
+    }
+    return 1;
+}
+
+static void emit_callback(FILE *o, const Stmt *s, int id) {
+    if (!scalar_callback(s)) return;
+    int returns = wt_base(s->as.func.ret) != WT_VOID;
+    const char *type = ctype(wt_base(s->as.func.ret));
+    fprintf(o, "static _Thread_local int _wind_cb_active_%d;\n", id);
+    fprintf(o, "__attribute__((unused)) static %s _wind_cb_%d(", type, id);
+    if (!s->as.func.nparams) fputs("void", o);
+    for (int i = 0; i < s->as.func.nparams; i++)
+        fprintf(o, "%s%s _arg%d", i ? ", " : "", ctype(wt_base(s->as.func.params[i].type)), i);
+    fprintf(o, ") {\n"
+               "    if (!_wind_cb_active_%d) { fputs(\"Wind: C callback called outside its native call or on another thread\\n\", stderr); exit(EXIT_FAILURE); }\n"
+               "    int _old_floor = _wind_cb_floor;\n"
+               "    _wind_cb_floor = _wt_depth;\n    ", id);
+    if (returns) fprintf(o, "%s _result = ", type);
+    fprintf(o, "%s(", s->as.func.name);
+    for (int i = 0; i < s->as.func.nparams; i++) fprintf(o, "%s_arg%d", i ? ", " : "", i);
+    fputs(");\n    _wt_depth = _wind_cb_floor;\n    _wind_cb_floor = _old_floor;\n", o);
+    if (returns) fputs("    return _result;\n", o);
+    fputs("}\n", o);
+}
+
 static void emit_c_call(FILE *o, const Expr *e, const WindCFunction *binding) {
     /* Вложенный вызов может расширить таблицу привязки. */
     WindCFunction signature = *binding;
@@ -476,34 +524,89 @@ static void emit_c_call(FILE *o, const Expr *e, const WindCFunction *binding) {
         snprintf(name, sizeof name, "%.70s.%.70s", callee->as.dot.obj->as.ident, binding->name);
     else
         snprintf(name, sizeof name, "%.150s", binding->symbol);
-    if (e->as.call.nargs != binding->nargs) {
-        if (!binding->nargs)
+    int arg_index[WIND_C_MAX_PARAMS], source_buffer[WIND_C_MAX_PARAMS], callback[WIND_C_MAX_PARAMS];
+    int nargs = 0, has_callback = 0;
+    for (int i = 0; i < binding->nargs; i++) source_buffer[i] = callback[i] = -1;
+    for (int i = 0; i < binding->nargs; i++)
+        if (binding->buffer_lengths[i]) source_buffer[binding->buffer_lengths[i] - 1] = i;
+    for (int i = 0; i < binding->nargs; i++)
+        arg_index[i] = source_buffer[i] < 0 ? nargs++ : -1;
+    if (e->as.call.nargs != nargs) {
+        if (!nargs)
             snprintf(message, sizeof message, "`%s()` expects no arguments", name);
         else
             snprintf(message, sizeof message, "`%s()` expects %d argument(s), got %d",
-                     name, binding->nargs, e->as.call.nargs);
+                     name, nargs, e->as.call.nargs);
         c_call_error(callee, message, NULL);
     }
     for (int i = 0; i < binding->nargs; i++) {
-        WType expected = wt_base(binding->args[i]), actual = infer(e->as.call.args[i]);
+        if (arg_index[i] < 0) continue;
+        int n = arg_index[i];
+        const Expr *arg = e->as.call.args[n];
+        if (binding->args[i] == TK_C_CALLBACK) {
+            callback[i] = callback_index(arg, &binding->callbacks[i]);
+            if (callback[i] < 0)
+                c_call_error(arg, "C callback requires a named Wind function with the exact signature", NULL);
+            has_callback = 1;
+            continue;
+        }
+        TokenKind elem = wind_c_buffer_element(binding->args[i]);
+        if (elem != TK_BAD) {
+            const char *var = arg->kind == EX_IDENT ? arg->as.ident :
+                arg->kind == EX_TYPED ? arg->as.typed.name : NULL;
+            VType v = coll_vtype(arg);
+            if (v.ck != CK_ARRAY || v.elem != wt_base(elem))
+                c_call_error(arg, "C buffer requires a named array of the matching element type", NULL);
+            if (g_volatile && local_declared(var))
+                c_call_error(arg, "local arrays in a function with `try` cannot be borrowed by C", NULL);
+            continue;
+        }
+        WType expected = wt_base(binding->args[i]), actual = infer(arg);
         if (expected != actual) {
             snprintf(message, sizeof message, "argument %d of `%s()` expects `%s`, found `%s`",
-                     i + 1, name, wind_type_name(expected), wind_type_name(actual));
-            c_call_error(e->as.call.args[i], message, NULL);
+                     n + 1, name, wind_type_name(expected), wind_type_name(actual));
+            c_call_error(arg, message, NULL);
         }
     }
     int external = binding->range.line != 0;
+    if (has_callback) {
+        fputs("({ ", o);
+        for (int i = 0; i < binding->nargs; i++) {
+            if (arg_index[i] < 0 || callback[i] >= 0) continue;
+            fprintf(o, "__auto_type _wind_arg_%d = (", i);
+            emit_expr(o, e->as.call.args[arg_index[i]]);
+            fputs("); ", o);
+        }
+        for (int i = 0; i < binding->nargs; i++)
+            if (callback[i] >= 0) fprintf(o, "++_wind_cb_active_%d; ", callback[i]);
+        if (binding->result != TK_KW_VOID) fputs("__auto_type _wind_cb_result = ", o);
+    }
     if (binding->copy_string) fputs(external ? "_wind_copy_cstr(" : "wstr_dup(", o);
     if (external) fprintf(o, "(%s)(", binding->symbol);
     else fprintf(o, "%s(", binding->symbol);
     for (int i = 0; i < binding->nargs; i++) {
         if (i) fputs(", ", o);
-        emit_expr(o, e->as.call.args[i]);
+        if (source_buffer[i] >= 0) {
+            const Expr *array = e->as.call.args[arg_index[source_buffer[i]]];
+            fputs("_wind_buffer_length(sizeof(", o);
+            emit_expr(o, array);
+            fputs(") / sizeof((", o);
+            emit_expr(o, array);
+            fputs(")[0]))", o);
+        } else if (callback[i] >= 0) fprintf(o, "_wind_cb_%d", callback[i]);
+        else if (has_callback) fprintf(o, "_wind_arg_%d", i);
+        else emit_expr(o, e->as.call.args[arg_index[i]]);
     }
     fputc(')', o);
     if (binding->copy_string) {
         if (external) fprintf(o, ", \"%s\"", binding->symbol);
         fputc(')', o);
+    }
+    if (has_callback) {
+        fputs("; ", o);
+        for (int i = 0; i < binding->nargs; i++)
+            if (callback[i] >= 0) fprintf(o, "--_wind_cb_active_%d; ", callback[i]);
+        fputs(binding->result == TK_KW_VOID ? " (void)0; })" : "_wind_cb_result; })", o);
     }
 }
 
@@ -1203,9 +1306,10 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
             indent(o, ind + 1);
             fputs("if (_wt_depth >= 32) { fprintf(stderr, \"try: too deep\\n\"); exit(1); }\n", o);
             indent(o, ind + 1);
-            fputs("if (setjmp(_wt_jb[_wt_depth++]) == 0) {\n", o);
+            fputs("_wt_frame _wt_guard __attribute__((cleanup(_wt_leave))) = {_wt_depth++};\n", o);
+            indent(o, ind + 1);
+            fputs("if (setjmp(_wt_jb[_wt_guard.index]) == 0) {\n", o);
             emit_block(o, &s->as.tryc.body, ind + 2);
-            indent(o, ind + 2); fputs("_wt_depth--;\n", o);
             indent(o, ind + 1); fputs("} else {\n", o);
             if (s->as.tryc.catch_var) {
                 sym_add(g_loc, &g_nloc, s->as.tryc.catch_var, vt_scalar(WT_STR));
@@ -1418,9 +1522,11 @@ int wind_codegen(const Program *p, FILE *out, WindDiagnostics *diags, int gc_str
     cg_stmt = cg_func = NULL;
     cg_source = NULL;
     cg_interp_range = (WindRange){0};
-    cg_has_handles = 0;
-    for (int i = 0; i < p->nc_imports; i++)
+    cg_has_handles = cg_has_callbacks = 0;
+    for (int i = 0; i < p->nc_imports; i++) {
         if (p->c_imports[i].binding->runtime_source) cg_has_handles = 1;
+        if (wind_c_has_callbacks(p->c_imports[i].binding)) cg_has_callbacks = 1;
+    }
     unsigned previous = diags->count;
     g_nglob = g_nloc = g_nfunc = g_rep_id = 0;
     g_gc_strings = gc_strings;
@@ -1469,6 +1575,13 @@ int wind_codegen(const Program *p, FILE *out, WindDiagnostics *diags, int gc_str
     for (int i = 0; i < p->nc_imports; i++)
         wind_c_emit_header(out, p->c_imports[i].binding, i);
 
+    if (cg_has_callbacks)
+        fputs("static _Thread_local int _wind_cb_floor = -1;\n"
+              "static void _wind_cb_check_throw(int depth) {\n"
+              "    if (_wind_cb_floor >= 0 && depth <= _wind_cb_floor) {\n"
+              "        fputs(\"Wind: exception cannot escape a C callback\\n\", stderr); exit(EXIT_FAILURE);\n"
+              "    }\n}\n", out);
+    else fputs("#define _wind_cb_check_throw(depth) ((void)0)\n", out);
     if (g_gc_strings) {
         fputs("#include \"strings_gc.h\"\n#include \"collections_gc.h\"\n"
               "#define WIND_GROW(p,used,n) wind_str_grow((p),(used),(n))\n"
@@ -1487,6 +1600,7 @@ int wind_codegen(const Program *p, FILE *out, WindDiagnostics *diags, int gc_str
               "    if (_wt_depth == frame->index + 1) --_wt_depth;\n"
               "}\n"
               "__attribute__((unused,noreturn)) static void _wt_throw(char *msg) {\n"
+              "    _wind_cb_check_throw(_wt_depth);\n"
               "    _wt_msg = msg ? msg : \"\";\n"
               "    if (_wt_depth) {\n"
               "        int index = --_wt_depth;\n"
@@ -1508,7 +1622,12 @@ int wind_codegen(const Program *p, FILE *out, WindDiagnostics *diags, int gc_str
     fputs("#include <setjmp.h>\n"
           "static jmp_buf _wt_jb[32]; static int _wt_depth = 0;\n"
           "static const char *_wt_msg = \"\";\n"
+          "typedef struct {int index;} _wt_frame;\n"
+          "__attribute__((unused)) static void _wt_leave(_wt_frame *frame) {\n"
+          "    if (_wt_depth == frame->index + 1) --_wt_depth;\n"
+          "}\n"
           "__attribute__((unused)) static void _wt_throw(const char *m){\n"
+          "    _wind_cb_check_throw(_wt_depth);\n"
           "    _wt_msg = m ? m : \"\";\n"
           "    if (_wt_depth > 0) longjmp(_wt_jb[--_wt_depth], 1);\n"
           "    fprintf(stderr, \"uncaught: %s\\n\", _wt_msg); exit(1);\n}\n\n", out);
@@ -1745,6 +1864,11 @@ int wind_codegen(const Program *p, FILE *out, WindDiagnostics *diags, int gc_str
             cg_at(p->body.items[i]);
             emit_func_signature(out, p->body.items[i]); fputs(";\n", out);
         }
+    if (cg_has_callbacks) {
+        int id = 0;
+        for (int i = 0; i < p->body.n; i++)
+            if (p->body.items[i]->kind == ST_FUNC) emit_callback(out, p->body.items[i], id++);
+    }
     fputs("\n", out);
 
     /* глобалы в file-scope (скаляры — init в main; массивы — zero-init тут) */
@@ -1771,6 +1895,11 @@ int wind_codegen(const Program *p, FILE *out, WindDiagnostics *diags, int gc_str
           "    if (!value) { fprintf(stderr, \"Wind: C function '%s' returned NULL\\n\", name); exit(EXIT_FAILURE); }\n"
           "    return wstr_dup(value);\n"
           "}\n\n", out);
+    if (p->nc_imports)
+        fputs("#include <limits.h>\n"
+              "__attribute__((unused)) static int _wind_buffer_length(size_t n) {\n"
+              "    if (n > INT_MAX) { fputs(\"Wind: C buffer length exceeds INT_MAX\\n\", stderr); exit(EXIT_FAILURE); }\n"
+              "    return (int)n;\n}\n\n", out);
 
     for (int i = 0; i < p->body.n; i++)
         if (p->body.items[i]->kind == ST_FUNC) emit_func(out, p->body.items[i]);

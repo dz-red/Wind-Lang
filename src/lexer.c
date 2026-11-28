@@ -455,6 +455,11 @@ const char *wind_token_kind_name(TokenKind kind) {
         case TK_KW_FROM: return "KW_FROM";
         case TK_C_SQLITE_DB: return "SQLITE_DB";
         case TK_C_SQLITE_STMT: return "SQLITE_STMT";
+        case TK_C_INT_BUFFER: return "INT_BUFFER";
+        case TK_C_CONST_INT_BUFFER: return "CONST_INT_BUFFER";
+        case TK_C_FRAC_BUFFER: return "FRAC_BUFFER";
+        case TK_C_CONST_FRAC_BUFFER: return "CONST_FRAC_BUFFER";
+        case TK_C_CALLBACK: return "C_CALLBACK";
     }
     return "?";
 }
