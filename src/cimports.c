@@ -70,6 +70,19 @@ void wind_c_emit_header(FILE *out, const WindCModule *module, int import_index) 
     fputs("#line 1 \"output_ast.c\"\n", out);
 }
 
+static void emit_record_check(FILE *out, const WindCRecord *record) {
+    if (!record) return;
+    const char *type = record->c_type;
+    fprintf(out, "    _Static_assert(sizeof(%s) == %lld && _Alignof(%s) == %lld, \"C record layout differs\");\n",
+            type, record->size, type, record->alignment);
+    for (int i = 0; i < record->nfields; i++) {
+        const WindCField *field = &record->fields[i];
+        fprintf(out, "    _Static_assert(__builtin_offsetof(%s, %s) * __CHAR_BIT__ == %lld && "
+                     "__builtin_types_compatible_p(__typeof__(&((%s *)0)->%s), %s *), \"C field layout or type differs\");\n",
+                type, field->name, field->offset, type, field->name, c_type(field->type));
+    }
+}
+
 void wind_c_emit_checks(FILE *out, const WindCModule *module, int import_index) {
     if (!module->functions[0].name) return;
     fputs("#pragma GCC diagnostic push\n"
@@ -79,11 +92,12 @@ void wind_c_emit_checks(FILE *out, const WindCModule *module, int import_index) 
         fprintf(out, "#line 1 \"wind-ffi-signature-%d-%d\"\n"
                      "static inline void _wind_ffi_check_%d_%d(void) {\n"
                      "    %s (*prototype)(",
-                import_index, i, import_index, i, c_type(f->result));
+                import_index, i, import_index, i, f->result_record ? f->result_record->c_type : c_type(f->result));
         if (!f->nargs) fputs("void", out);
         for (int j = 0; j < f->nargs; j++) {
             if (j) fputs(", ", out);
-            if (f->args[j] != TK_C_CALLBACK) fputs(c_type(f->args[j]), out);
+            if (f->arg_records[j]) fputs(f->arg_records[j]->c_type, out);
+            else if (f->args[j] != TK_C_CALLBACK) fputs(c_type(f->args[j]), out);
             else {
                 const WindCCallback *callback = &f->callbacks[j];
                 fprintf(out, "%s (*)(", c_type(callback->result));
@@ -93,7 +107,16 @@ void wind_c_emit_checks(FILE *out, const WindCModule *module, int import_index) 
                 fputc(')', out);
             }
         }
-        fprintf(out, ") = &%s;\n    (void)prototype;\n}\n", f->symbol);
+        fprintf(out, ") = &%s;\n    (void)prototype;\n", f->symbol);
+        emit_record_check(out, f->result_record);
+        for (int j = 0; j < f->nargs; j++) {
+            const WindCRecord *record = f->arg_records[j];
+            if (!record || record == f->result_record) continue;
+            int first = 0;
+            while (f->arg_records[first] != record) first++;
+            if (first == j) emit_record_check(out, record);
+        }
+        fputs("}\n", out);
     }
     fputs("#pragma GCC diagnostic pop\n#line 1 \"output_ast.c\"\n", out);
 }

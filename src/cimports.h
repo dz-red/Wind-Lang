@@ -9,6 +9,21 @@ enum { WIND_C_MAX_PARAMS = 16 };
 typedef struct WindCHeader WindCHeader;
 typedef struct WindCOwnership WindCOwnership;
 
+enum { WIND_C_RECORD_FIELDS = 32, WIND_C_RECORD_NAME = 128 };
+
+typedef struct {
+    char name[WIND_C_RECORD_NAME];
+    TokenKind type;
+    long long offset;
+} WindCField;
+
+typedef struct WindCRecord {
+    char c_type[WIND_C_RECORD_NAME + sizeof "struct "];
+    int nfields;
+    long long size, alignment;
+    WindCField fields[WIND_C_RECORD_FIELDS];
+} WindCRecord;
+
 typedef struct {
     TokenKind result;
     int nargs;
@@ -24,6 +39,7 @@ typedef struct {
     TokenKind args[WIND_C_MAX_PARAMS];
     unsigned char buffer_lengths[WIND_C_MAX_PARAMS];
     WindCCallback callbacks[WIND_C_MAX_PARAMS];
+    const WindCRecord *result_record, *arg_records[WIND_C_MAX_PARAMS];
     WindRange range;
 } WindCFunction;
 

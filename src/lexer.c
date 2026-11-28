@@ -460,6 +460,7 @@ const char *wind_token_kind_name(TokenKind kind) {
         case TK_C_FRAC_BUFFER: return "FRAC_BUFFER";
         case TK_C_CONST_FRAC_BUFFER: return "CONST_FRAC_BUFFER";
         case TK_C_CALLBACK: return "C_CALLBACK";
+        case TK_C_RECORD: return "C_RECORD";
     }
     return "?";
 }

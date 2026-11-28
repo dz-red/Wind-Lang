@@ -7,7 +7,8 @@
 #include "astcodegen.h"
 
 typedef enum {
-    WT_INT, WT_FRAC, WT_STR, WT_VOID, WT_BOOL, WT_JSON, WT_SQLITE_DB, WT_SQLITE_STMT, WT_UNKNOWN
+    WT_INT, WT_FRAC, WT_STR, WT_VOID, WT_BOOL, WT_JSON, WT_SQLITE_DB, WT_SQLITE_STMT, WT_UNKNOWN,
+    WT_C_RECORD_BASE = 256
 } WType;
 
 typedef enum { CK_SCALAR, CK_ARRAY, CK_LIST, CK_DICT } CKind;
@@ -25,6 +26,8 @@ static const Program *cg_program;
 static WindRange cg_interp_range;
 static int cg_has_handles;
 static int cg_has_callbacks;
+static int cg_has_records, cg_nrecords;
+static const WindCRecord *cg_records[256];
 
 static Sym      g_glob[256]; static int g_nglob;
 static Sym      g_loc[256];  static int g_nloc;     /* сбрасывается на каждую функцию/main */
@@ -96,7 +99,24 @@ static WType wt_base(TokenKind t) {
         default:         return WT_UNKNOWN;
     }
 }
+static WType c_value_type(TokenKind kind, const WindCRecord *record) {
+    if (!record) return wt_base(kind);
+    int i = 0;
+    while (i < cg_nrecords && cg_records[i] != record) i++;
+    if (i == cg_nrecords) {
+        if (i == (int)(sizeof cg_records / sizeof *cg_records)) cg_fail("too many C record types");
+        cg_records[cg_nrecords++] = record;
+    }
+    return (WType)(WT_C_RECORD_BASE + i);
+}
+
+static const WindCRecord *record_of(WType type) {
+    return type >= WT_C_RECORD_BASE ? cg_records[type - WT_C_RECORD_BASE] : NULL;
+}
+
 static const char *wind_type_name(WType t) {
+    const WindCRecord *record = record_of(t);
+    if (record) return record->c_type;
     switch (t) {
         case WT_INT:  return "int";
         case WT_FRAC: return "frac";
@@ -132,6 +152,8 @@ static VType coll_vtype(const Expr *coll) {
 }
 
 static const char *ctype(WType t) {
+    const WindCRecord *record = record_of(t);
+    if (record) return record->c_type;
     switch (t) {
         case WT_INT: case WT_BOOL: return "int";
         case WT_FRAC: return "double";
@@ -159,7 +181,24 @@ static int handle_type(WType type) {
 }
 
 static void reject_handle(const Expr *e, const char *context) {
-    if (cg_has_handles && handle_type(infer(e))) cg_fail("C handles cannot be used %s", context);
+    if (!cg_has_handles && !cg_has_records) return;
+    WType type = infer(e);
+    if (handle_type(type)) cg_fail("C handles cannot be used %s", context);
+    if (record_of(type)) cg_fail("C record values cannot be used %s", context);
+}
+
+static int is_record_field(const Expr *e, WType *type) {
+    if (!cg_has_records) return 0;
+    const WindCRecord *record = record_of(infer(e->as.dot.obj));
+    if (!record) return 0;
+    for (int i = 0; i < record->nfields; i++) {
+        const WindCField *field = &record->fields[i];
+        if (strcmp(field->name, e->as.dot.field)) continue;
+        *type = wt_base(field->type);
+        return 1;
+    }
+    cg_fail("C record `%.110s` has no field `%.100s`", record->c_type, e->as.dot.field);
+    return 0;
 }
 
 static _Noreturn void c_call_error(const Expr *callee, const char *message, const char *suggestions) {
@@ -247,6 +286,8 @@ static WType infer(const Expr *e) {
         case EX_BINARY: return infer_binary(e);
         case EX_INDEX:  return coll_vtype(e->as.index.coll).elem;
         case EX_DOT: {
+            WType field;
+            if (is_record_field(e, &field)) return field;
             VType ov = coll_vtype(e->as.dot.obj);
             if ((ov.ck == CK_LIST || ov.ck == CK_DICT) && !strcmp(e->as.dot.field, "len")) return WT_INT;
             if (ov.ck == CK_SCALAR && ov.elem == WT_STR && !strcmp(e->as.dot.field, "len")) return WT_INT;
@@ -256,7 +297,7 @@ static WType infer(const Expr *e) {
             const Expr *c = e->as.call.callee;
             if (c->kind == EX_DOT) {
                 const WindCFunction *binding = imported_c_function(c);
-                if (binding) return wt_base(binding->result);
+                if (binding) return c_value_type(binding->result, binding->result_record);
                 const Expr *o2 = c->as.dot.obj;
                 if (o2->kind == EX_IDENT && !strcmp(o2->as.ident, "file")) {
                     if (!strcmp(c->as.dot.field, "read"))   return WT_STR;
@@ -561,7 +602,7 @@ static void emit_c_call(FILE *o, const Expr *e, const WindCFunction *binding) {
                 c_call_error(arg, "local arrays in a function with `try` cannot be borrowed by C", NULL);
             continue;
         }
-        WType expected = wt_base(binding->args[i]), actual = infer(arg);
+        WType expected = c_value_type(binding->args[i], binding->arg_records[i]), actual = infer(arg);
         if (expected != actual) {
             snprintf(message, sizeof message, "argument %d of `%s()` expects `%s`, found `%s`",
                      n + 1, name, wind_type_name(expected), wind_type_name(actual));
@@ -889,6 +930,13 @@ static void emit_expr(FILE *o, const Expr *e) {
             break;
         }
         case EX_DOT: {                                /* nums.len / cfg.len */
+            WType field;
+            if (is_record_field(e, &field)) {
+                fputc('(', o);
+                emit_expr(o, e->as.dot.obj);
+                fprintf(o, ").%s", e->as.dot.field);
+                break;
+            }
             VType ov = coll_vtype(e->as.dot.obj);
             if (ov.ck == CK_LIST && !strcmp(e->as.dot.field, "len")) {
                 fputs("_wl_len(", o); emit_expr(o, e->as.dot.obj); fputc(')', o);
@@ -1164,11 +1212,28 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
             break;
         case ST_ASSIGN: {
             const Expr *tgt = s->as.assign.target;
-            if (cg_has_handles) {
+            WType field;
+            if (tgt->kind == EX_DOT && is_record_field(tgt, &field)) {
+                if (tgt->as.dot.obj->kind != EX_IDENT)
+                    cg_fail("C record field assignment requires a named variable");
+                if (s->as.assign.op != TK_ASSIGN || infer(s->as.assign.value) != field)
+                    cg_fail("C record field assignment requires '=' and a value of type `%s`",
+                            wind_type_name(field));
+                indent(o, ind);
+                emit_expr(o, tgt);
+                fputs(" = ", o);
+                emit_full_expr(o, s->as.assign.value);
+                fputs(";\n", o);
+                break;
+            }
+            if (cg_has_handles || cg_has_records) {
                 WType target = infer(tgt), value = infer(s->as.assign.value);
                 if ((handle_type(target) || handle_type(value)) &&
                     (target != value || s->as.assign.op != TK_ASSIGN))
                     cg_fail("C handle assignment requires '=' and matching handle types");
+                if ((record_of(target) || record_of(value)) &&
+                    (target != value || s->as.assign.op != TK_ASSIGN))
+                    cg_fail("C record assignment requires '=' and matching record types");
             }
             if (tgt->kind == EX_INDEX) {
                 VType cv = coll_vtype(tgt->as.index.coll);
@@ -1285,6 +1350,7 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
             break;
         }
         case ST_RETURN:
+            if (g_in_main) reject_handle(s->as.ret.value, "as a program exit status");
             if (g_gc_strings && g_in_main) {
                 indent(o, ind); fputs("{ int _wind_status = ", o);
                 if (s->as.ret.value) emit_full_expr(o, s->as.ret.value);
@@ -1323,6 +1389,7 @@ static void emit_stmt(FILE *o, const Stmt *s, int ind) {
             break;
         }
         case ST_THROW:
+            reject_handle(s->as.throwc.value, "as exceptions");
             indent(o, ind); fputs("_wt_throw(", o);
             emit_full_expr(o, s->as.throwc.value);
             fputs(");\n", o);
@@ -1522,10 +1589,11 @@ int wind_codegen(const Program *p, FILE *out, WindDiagnostics *diags, int gc_str
     cg_stmt = cg_func = NULL;
     cg_source = NULL;
     cg_interp_range = (WindRange){0};
-    cg_has_handles = cg_has_callbacks = 0;
+    cg_has_handles = cg_has_callbacks = cg_has_records = cg_nrecords = 0;
     for (int i = 0; i < p->nc_imports; i++) {
         if (p->c_imports[i].binding->runtime_source) cg_has_handles = 1;
         if (wind_c_has_callbacks(p->c_imports[i].binding)) cg_has_callbacks = 1;
+        if (p->c_imports[i].binding->auto_header) cg_has_records = 1;
     }
     unsigned previous = diags->count;
     g_nglob = g_nloc = g_nfunc = g_rep_id = 0;
@@ -1558,6 +1626,8 @@ int wind_codegen(const Program *p, FILE *out, WindDiagnostics *diags, int gc_str
                 if (el == WT_VOID || el == WT_UNKNOWN) cg_fail("unknown global array type '%s'", s->as.decl.name);
                 vt.ck = CK_ARRAY; vt.elem = el; vt.key = WT_UNKNOWN;
             } else {
+                if (dt->kind != DT_INFER)
+                    reject_handle(s->as.decl.init, "in a scalar declaration; use var");
                 WType t = (dt->kind == DT_INFER) ? infer(s->as.decl.init) : wt_base(dt->base);
                 if (t == WT_VOID || t == WT_UNKNOWN) cg_fail("cannot infer type of global '%s'", s->as.decl.name);
                 vt = vt_scalar(t);

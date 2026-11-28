@@ -87,6 +87,7 @@ typedef enum {
     TK_C_FRAC_BUFFER,
     TK_C_CONST_FRAC_BUFFER,
     TK_C_CALLBACK,
+    TK_C_RECORD,
 } TokenKind;
 
 typedef struct {

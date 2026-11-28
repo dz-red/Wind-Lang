@@ -16,7 +16,9 @@
     X(visitChildren) X(getCursorSpelling) X(getCursorType) X(getCanonicalType) \
     X(getResultType) X(getNumArgTypes) X(getArgType) X(getPointeeType) \
     X(isConstQualifiedType) X(isVolatileQualifiedType) X(isFunctionTypeVariadic) \
-    X(getFunctionTypeCallingConv) X(getClangVersion)
+    X(getFunctionTypeCallingConv) X(getClangVersion) X(getTypeDeclaration) \
+    X(getCursorDefinition) X(getCursorSemanticParent) X(equalCursors) \
+    X(Cursor_isBitField) X(Cursor_getOffsetOfField) X(Type_getSizeOf) X(Type_getAlignOf) X(getTypeSpelling)
 
 static struct {
 #define MEMBER(name) __typeof__(&clang_##name) name;
@@ -24,9 +26,16 @@ static struct {
 #undef MEMBER
 } api;
 
+typedef struct ParsedRecord {
+    WindCRecord value;
+    CXCursor definition;
+    struct ParsedRecord *next;
+} ParsedRecord;
+
 struct WindCHeader {
     CXIndex index;
     CXTranslationUnit unit;
+    ParsedRecord *records;
 };
 
 static int load_clang(void) {
@@ -55,6 +64,11 @@ static int load_clang(void) {
 
 void wind_cheader_free(WindCHeader *header) {
     if (!header) return;
+    while (header->records) {
+        ParsedRecord *record = header->records;
+        header->records = record->next;
+        free(record);
+    }
     if (header->unit) api.disposeTranslationUnit(header->unit);
     if (header->index) api.disposeIndex(header->index);
     free(header);
@@ -171,7 +185,96 @@ static int scalar_signature(CXType type, WindCCallback *signature) {
     return 1;
 }
 
+static int copy_identifier(CXCursor cursor, char *out, size_t cap) {
+    CXString spelling = api.getCursorSpelling(cursor);
+    const char *name = api.getCString(spelling);
+    const char *letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_";
+    int valid = name && *name && strlen(name) < cap && strchr(letters, *name) &&
+        strspn(name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789") == strlen(name);
+    if (valid) strcpy(out, name);
+    api.disposeString(spelling);
+    return valid;
+}
+
 typedef struct {
+    WindCRecord *record;
+    int invalid;
+} Fields;
+
+static enum CXChildVisitResult visit_field(CXCursor cursor, CXCursor parent, CXClientData data) {
+    (void)parent;
+    Fields *fields = data;
+    if (cursor.kind == CXCursor_StructDecl || cursor.kind == CXCursor_UnionDecl) {
+        fields->invalid = 1;
+        return CXChildVisit_Break;
+    }
+    if (cursor.kind != CXCursor_FieldDecl) return CXChildVisit_Continue;
+    CXType type = api.getCanonicalType(api.getCursorType(cursor));
+    TokenKind kind = wind_type(type);
+    long long offset = api.Cursor_getOffsetOfField(cursor);
+    WindCRecord *record = fields->record;
+    if (record->nfields < WIND_C_RECORD_FIELDS && (kind == TK_KW_INT || kind == TK_KW_FRAC) &&
+        !api.isConstQualifiedType(type) && !api.isVolatileQualifiedType(type) &&
+        !api.Cursor_isBitField(cursor) && offset >= 0) {
+        WindCField *field = &record->fields[record->nfields];
+        if (copy_identifier(cursor, field->name, sizeof field->name)) {
+            field->type = kind;
+            field->offset = offset;
+            record->nfields++;
+            return CXChildVisit_Continue;
+        }
+    }
+    fields->invalid = 1;
+    return CXChildVisit_Break;
+}
+
+static const WindCRecord *record_type(WindCHeader *header, CXType type) {
+    CXType original = type;
+    type = api.getCanonicalType(type);
+    if (type.kind != CXType_Record) return NULL;
+    CXCursor declaration = api.getTypeDeclaration(type);
+    if (declaration.kind != CXCursor_StructDecl) return NULL;
+    CXCursor definition = api.getCursorDefinition(declaration);
+    if (definition.kind != CXCursor_StructDecl) return NULL;
+    CXCursor root = api.getTranslationUnitCursor(header->unit);
+    if (!api.equalCursors(api.getCursorSemanticParent(definition), root)) return NULL;
+    for (ParsedRecord *record = header->records; record; record = record->next)
+        if (api.equalCursors(record->definition, definition)) return &record->value;
+
+    char tag[WIND_C_RECORD_NAME], c_name[sizeof "struct " + WIND_C_RECORD_NAME];
+    CXString spelling = api.getTypeSpelling(type);
+    const char *text = api.getCString(spelling);
+    int has_tag = text && (!strncmp(text, "struct ", 7) || !strncmp(text, "const struct ", 13) ||
+                          !strncmp(text, "volatile struct ", 16));
+    api.disposeString(spelling);
+    if (has_tag && copy_identifier(declaration, tag, sizeof tag)) {
+        snprintf(c_name, sizeof c_name, "struct %s", tag);
+    } else {
+        CXCursor alias = api.getTypeDeclaration(original);
+        if (alias.kind != CXCursor_TypedefDecl ||
+            !api.equalCursors(api.getCursorSemanticParent(alias), root) ||
+            !copy_identifier(alias, c_name, WIND_C_RECORD_NAME)) return NULL;
+    }
+    ParsedRecord *parsed = calloc(1, sizeof *parsed);
+    if (!parsed) return NULL;
+    parsed->definition = definition;
+    WindCRecord *record = &parsed->value;
+    strcpy(record->c_type, c_name);
+    record->size = api.Type_getSizeOf(type);
+    record->alignment = api.Type_getAlignOf(type);
+    Fields fields = {record, 0};
+    api.visitChildren(definition, visit_field, &fields);
+    if (fields.invalid || !record->nfields || record->size <= 0 || record->alignment <= 0) {
+        free(parsed);
+        return NULL;
+    }
+    parsed->next = header->records;
+    header->records = parsed;
+    return record;
+}
+
+typedef struct {
+    WindCHeader *header;
     const char *name;
     WindCFunction *out;
     WindCHeaderStatus status;
@@ -188,7 +291,8 @@ static enum CXChildVisitResult visit(CXCursor cursor, CXCursor parent, CXClientD
     if (!match) return CXChildVisit_Continue;
 
     lookup->status = C_HEADER_UNSUPPORTED;
-    CXType type = api.getCanonicalType(api.getCursorType(cursor));
+    CXType original = api.getCursorType(cursor);
+    CXType type = api.getCanonicalType(original);
     if (type.kind != CXType_FunctionProto || api.isFunctionTypeVariadic(type))
         return CXChildVisit_Break;
     enum CXCallingConv convention = api.getFunctionTypeCallingConv(type);
@@ -197,12 +301,16 @@ static enum CXChildVisitResult visit(CXCursor cursor, CXCursor parent, CXClientD
     WindCFunction *f = lookup->out;
     f->nargs = api.getNumArgTypes(type);
     if (f->nargs < 0 || f->nargs > WIND_C_MAX_PARAMS) return CXChildVisit_Break;
-    f->result = wind_type(api.getResultType(type));
+    CXType result = api.getResultType(original);
+    f->result_record = record_type(lookup->header, result);
+    f->result = f->result_record ? TK_C_RECORD : wind_type(result);
     if (f->result == TK_BAD || f->result == TK_C_CALLBACK ||
         wind_c_buffer_element(f->result) != TK_BAD) return CXChildVisit_Break;
     for (int i = 0; i < f->nargs; i++) {
-        CXType arg = api.getCanonicalType(api.getArgType(type, (unsigned)i));
-        f->args[i] = wind_type(arg);
+        CXType raw = api.getArgType(original, (unsigned)i);
+        CXType arg = api.getCanonicalType(raw);
+        f->arg_records[i] = record_type(lookup->header, raw);
+        f->args[i] = f->arg_records[i] ? TK_C_RECORD : wind_type(arg);
         if (f->args[i] == TK_BAD || f->args[i] == TK_KW_VOID) return CXChildVisit_Break;
         if (f->args[i] == TK_C_CALLBACK &&
             !scalar_signature(api.getCanonicalType(api.getPointeeType(arg)), &f->callbacks[i]))
@@ -213,7 +321,7 @@ static enum CXChildVisitResult visit(CXCursor cursor, CXCursor parent, CXClientD
 }
 
 WindCHeaderStatus wind_cheader_function(WindCHeader *header, const char *name, WindCFunction *out) {
-    Lookup lookup = {name, out, C_HEADER_NO_FUNCTION};
+    Lookup lookup = {header, name, out, C_HEADER_NO_FUNCTION};
     api.visitChildren(api.getTranslationUnitCursor(header->unit), visit, &lookup);
     return lookup.status;
 }
