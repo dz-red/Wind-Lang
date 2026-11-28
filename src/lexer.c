@@ -459,6 +459,11 @@ const char *wind_token_kind_name(TokenKind kind) {
         case TK_C_CONST_INT_BUFFER: return "CONST_INT_BUFFER";
         case TK_C_FRAC_BUFFER: return "FRAC_BUFFER";
         case TK_C_CONST_FRAC_BUFFER: return "CONST_FRAC_BUFFER";
+        case TK_C_VOID_BUFFER: return "VOID_BUFFER";
+        case TK_C_CONST_VOID_BUFFER: return "CONST_VOID_BUFFER";
+        case TK_C_UCHAR_BUFFER: return "UCHAR_BUFFER";
+        case TK_C_CONST_UCHAR_BUFFER: return "CONST_UCHAR_BUFFER";
+        case TK_C_SIZE: return "C_SIZE";
         case TK_C_CALLBACK: return "C_CALLBACK";
         case TK_C_RECORD: return "C_RECORD";
     }

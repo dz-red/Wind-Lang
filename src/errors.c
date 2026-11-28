@@ -84,7 +84,7 @@ static const char *explanation(WindDiagCode code) {
             return "The binding's C function signature must exactly match the declaration in its header.";
         case WD_C_HEADER_DISCOVERY:
             return "Automatic C bindings use libclang to read function declarations. String pointers,\n"
-                   "  numeric buffers and synchronous callbacks require explicit borrowing or copying rules.";
+                   "  buffers and synchronous callbacks require explicit borrowing or copying rules.";
         default: return NULL;
     }
 }

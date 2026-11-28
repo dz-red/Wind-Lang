@@ -60,6 +60,7 @@ extern const WindCModule wind_c_modules[];
 const WindCModule *wind_c_module(const char *name);
 const WindCFunction *wind_c_function(const WindCModule *module, const char *name);
 TokenKind wind_c_buffer_element(TokenKind type);
+int wind_c_byte_buffer(TokenKind type);
 int wind_c_has_callbacks(const WindCModule *module);
 const WindCFunction *wind_c_resolve(const WindCModule *module, const char *name,
                                    WindDiagnostics *diags, const WindSource *source, WindRange range);

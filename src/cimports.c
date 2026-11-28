@@ -11,6 +11,7 @@ struct WindCOwnership {
     char *symbol;
     unsigned borrowed;
     unsigned callbacks;
+    unsigned bytes;
     unsigned char lengths[WIND_C_MAX_PARAMS];
     int copy;
     WindCOwnership *next;
@@ -43,6 +44,11 @@ TokenKind wind_c_buffer_element(TokenKind type) {
     }
 }
 
+int wind_c_byte_buffer(TokenKind type) {
+    return type == TK_C_VOID_BUFFER || type == TK_C_CONST_VOID_BUFFER ||
+           type == TK_C_UCHAR_BUFFER || type == TK_C_CONST_UCHAR_BUFFER;
+}
+
 int wind_c_has_callbacks(const WindCModule *module) {
     for (const WindCOwnership *rule = module->ownership; rule; rule = rule->next)
         if (rule->callbacks) return 1;
@@ -58,6 +64,11 @@ static const char *c_type(TokenKind type) {
         case TK_C_CONST_INT_BUFFER: return "const int *";
         case TK_C_FRAC_BUFFER: return "double *";
         case TK_C_CONST_FRAC_BUFFER: return "const double *";
+        case TK_C_VOID_BUFFER: return "void *";
+        case TK_C_CONST_VOID_BUFFER: return "const void *";
+        case TK_C_UCHAR_BUFFER: return "unsigned char *";
+        case TK_C_CONST_UCHAR_BUFFER: return "const unsigned char *";
+        case TK_C_SIZE: return "size_t";
         case TK_C_SQLITE_DB: return "WindSqliteDb";
         case TK_C_SQLITE_STMT: return "WindSqliteStmt";
         default: return "void";
@@ -185,9 +196,10 @@ const WindCFunction *wind_c_resolve(const WindCModule *module, const char *name,
         snprintf(suggestion, sizeof suggestion, "Add `copy_cstr %.150s` if it returns a borrowed C string.", name);
         hint = suggestion;
     } else {
-        unsigned strings = 0, callbacks = 0, lengths = 0;
+        unsigned strings = 0, callbacks = 0, lengths = 0, byte_lengths = 0, sizes = 0;
         int wrong_rule = 0;
         for (int i = 0; i < f.nargs; i++) {
+            if (f.args[i] == TK_C_SIZE) sizes |= 1u << i;
             if (f.args[i] == TK_KW_STR) {
                 strings |= 1u << i;
                 if (rule && (rule->borrowed & (1u << i))) continue;
@@ -208,23 +220,29 @@ const WindCFunction *wind_c_resolve(const WindCModule *module, const char *name,
                 break;
             }
             int length = rule ? rule->lengths[i] : 0;
-            if (wind_c_buffer_element(f.args[i]) == TK_BAD) {
+            int bytes = wind_c_byte_buffer(f.args[i]);
+            if (!bytes && wind_c_buffer_element(f.args[i]) == TK_BAD) {
                 if (length) wrong_rule = 1;
                 continue;
             }
             if (!length) {
-                snprintf(message, sizeof message, "argument %d of C function `%.120s` needs `borrow_buffer`",
-                         i + 1, name);
-                snprintf(suggestion, sizeof suggestion, "Add `borrow_buffer %.100s %d length_argument` if C does not retain the array.",
-                         name, i + 1);
+                const char *mode = bytes ? "borrow_bytes" : "borrow_buffer";
+                snprintf(message, sizeof message, "argument %d of C function `%.120s` needs `%s`",
+                         i + 1, name, mode);
+                snprintf(suggestion, sizeof suggestion, "Add `%s %.100s %d length_argument` if C does not retain the array.",
+                         mode, name, i + 1);
                 hint = suggestion;
                 break;
             }
-            if (length > f.nargs || f.args[length - 1] != TK_KW_INT || (lengths & (1u << (length - 1)))) {
+            unsigned bit = 1u << (length - 1);
+            if (length > f.nargs || (f.args[length - 1] != TK_KW_INT && f.args[length - 1] != TK_C_SIZE) ||
+                bytes != !!(rule->bytes & (1u << i)) ||
+                ((lengths & bit) && bytes != !!(byte_lengths & bit))) {
                 wrong_rule = 1;
                 continue;
             }
-            lengths |= 1u << (length - 1);
+            lengths |= bit;
+            if (bytes) byte_lengths |= bit;
             f.buffer_lengths[i] = (unsigned char)length;
         }
         if (rule) {
@@ -235,6 +253,8 @@ const WindCFunction *wind_c_resolve(const WindCModule *module, const char *name,
         }
         if (!hint && wrong_rule) {
             snprintf(message, sizeof message, "ownership rule does not match C function `%.140s`", name);
+        } else if (!hint && (sizes & ~lengths)) {
+            snprintf(message, sizeof message, "C function `%.140s` uses `size_t` outside a buffer length", name);
         } else if (!hint) {
             f.name = copy_n(name, strlen(name));
             f.symbol = copy_n(name, strlen(name));
@@ -388,7 +408,7 @@ static int parse_function(BindingParser *p, WindCModule *m) {
     return 1;
 }
 
-typedef enum { COPY_STRING, BORROW_STRING, BORROW_BUFFER, BORROW_CALLBACK } OwnershipKind;
+typedef enum { COPY_STRING, BORROW_STRING, BORROW_BUFFER, BORROW_BYTES, BORROW_CALLBACK } OwnershipKind;
 
 static int argument_index(BindingParser *p) {
     Token *index = expect(p, TK_INT_LIT, "expected a 1-based C argument number");
@@ -403,8 +423,9 @@ static int parse_ownership(BindingParser *p, WindCModule *module, OwnershipKind 
     if (!name) return 0;
     int index = kind == COPY_STRING ? 1 : argument_index(p);
     if (!index) return 0;
-    int length = kind == BORROW_BUFFER ? argument_index(p) : 0;
-    if (kind == BORROW_BUFFER && !length) return 0;
+    int buffer = kind == BORROW_BUFFER || kind == BORROW_BYTES;
+    int length = buffer ? argument_index(p) : 0;
+    if (buffer && !length) return 0;
     unsigned bit = 1u << (index - 1);
     if (!end_line(p)) return 0;
     WindCOwnership *rule = ownership(module, name->text);
@@ -417,12 +438,15 @@ static int parse_ownership(BindingParser *p, WindCModule *module, OwnershipKind 
     if ((kind == COPY_STRING && rule->copy) ||
         (kind == BORROW_STRING && (bit & rule->borrowed)) ||
         (kind == BORROW_CALLBACK && (bit & rule->callbacks)) ||
-        (kind == BORROW_BUFFER && rule->lengths[index - 1]))
+        (buffer && rule->lengths[index - 1]))
         return binding_error(p, name, "duplicate ownership rule");
     if (kind == COPY_STRING) rule->copy = 1;
     else if (kind == BORROW_STRING) rule->borrowed |= bit;
     else if (kind == BORROW_CALLBACK) rule->callbacks |= bit;
-    else rule->lengths[index - 1] = (unsigned char)length;
+    else {
+        rule->lengths[index - 1] = (unsigned char)length;
+        if (kind == BORROW_BYTES) rule->bytes |= bit;
+    }
     module->auto_header = 1;
     return 1;
 }
@@ -460,6 +484,8 @@ static const WindCModule *parse_binding(const char *name, const WindSource *sour
             ok = parse_ownership(&p, m, BORROW_STRING);
         } else if (word(first, "borrow_buffer")) {
             ok = parse_ownership(&p, m, BORROW_BUFFER);
+        } else if (word(first, "borrow_bytes")) {
+            ok = parse_ownership(&p, m, BORROW_BYTES);
         } else if (word(first, "borrow_callback")) {
             ok = parse_ownership(&p, m, BORROW_CALLBACK);
         } else if (word(first, "auto")) {

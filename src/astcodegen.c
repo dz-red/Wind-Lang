@@ -555,6 +555,28 @@ static void emit_callback(FILE *o, const Stmt *s, int id) {
     fputs("}\n", o);
 }
 
+static void emit_buffer_length(FILE *o, const Expr *e, const WindCFunction *binding,
+                               const int *arg_index, unsigned sources) {
+    int i = 0;
+    while (!(sources & (1u << i))) i++;
+    sources &= ~(1u << i);
+    if (sources) fputs("_wind_shared_length(", o);
+    const Expr *array = e->as.call.args[arg_index[i]];
+    fputs("sizeof(", o);
+    emit_expr(o, array);
+    fputc(')', o);
+    if (!wind_c_byte_buffer(binding->args[i])) {
+        fputs(" / sizeof((", o);
+        emit_expr(o, array);
+        fputs(")[0])", o);
+    }
+    if (sources) {
+        fputs(", ", o);
+        emit_buffer_length(o, e, binding, arg_index, sources);
+        fputc(')', o);
+    }
+}
+
 static void emit_c_call(FILE *o, const Expr *e, const WindCFunction *binding) {
     /* Вложенный вызов может расширить таблицу привязки. */
     WindCFunction signature = *binding;
@@ -565,13 +587,15 @@ static void emit_c_call(FILE *o, const Expr *e, const WindCFunction *binding) {
         snprintf(name, sizeof name, "%.70s.%.70s", callee->as.dot.obj->as.ident, binding->name);
     else
         snprintf(name, sizeof name, "%.150s", binding->symbol);
-    int arg_index[WIND_C_MAX_PARAMS], source_buffer[WIND_C_MAX_PARAMS], callback[WIND_C_MAX_PARAMS];
+    int arg_index[WIND_C_MAX_PARAMS], callback[WIND_C_MAX_PARAMS];
+    unsigned source_buffers[WIND_C_MAX_PARAMS] = {0};
     int nargs = 0, has_callback = 0;
-    for (int i = 0; i < binding->nargs; i++) source_buffer[i] = callback[i] = -1;
+    for (int i = 0; i < binding->nargs; i++) {
+        callback[i] = -1;
+        if (binding->buffer_lengths[i]) source_buffers[binding->buffer_lengths[i] - 1] |= 1u << i;
+    }
     for (int i = 0; i < binding->nargs; i++)
-        if (binding->buffer_lengths[i]) source_buffer[binding->buffer_lengths[i] - 1] = i;
-    for (int i = 0; i < binding->nargs; i++)
-        arg_index[i] = source_buffer[i] < 0 ? nargs++ : -1;
+        arg_index[i] = source_buffers[i] ? -1 : nargs++;
     if (e->as.call.nargs != nargs) {
         if (!nargs)
             snprintf(message, sizeof message, "`%s()` expects no arguments", name);
@@ -592,11 +616,14 @@ static void emit_c_call(FILE *o, const Expr *e, const WindCFunction *binding) {
             continue;
         }
         TokenKind elem = wind_c_buffer_element(binding->args[i]);
-        if (elem != TK_BAD) {
+        int bytes = wind_c_byte_buffer(binding->args[i]);
+        if (bytes || elem != TK_BAD) {
             const char *var = arg->kind == EX_IDENT ? arg->as.ident :
                 arg->kind == EX_TYPED ? arg->as.typed.name : NULL;
             VType v = coll_vtype(arg);
-            if (v.ck != CK_ARRAY || v.elem != wt_base(elem))
+            if (bytes && (v.ck != CK_ARRAY || (v.elem != WT_INT && v.elem != WT_FRAC)))
+                c_call_error(arg, "C byte buffer requires a named `int` or `frac` array", NULL);
+            if (!bytes && (v.ck != CK_ARRAY || v.elem != wt_base(elem)))
                 c_call_error(arg, "C buffer requires a named array of the matching element type", NULL);
             if (g_volatile && local_declared(var))
                 c_call_error(arg, "local arrays in a function with `try` cannot be borrowed by C", NULL);
@@ -627,16 +654,19 @@ static void emit_c_call(FILE *o, const Expr *e, const WindCFunction *binding) {
     else fprintf(o, "%s(", binding->symbol);
     for (int i = 0; i < binding->nargs; i++) {
         if (i) fputs(", ", o);
-        if (source_buffer[i] >= 0) {
-            const Expr *array = e->as.call.args[arg_index[source_buffer[i]]];
-            fputs("_wind_buffer_length(sizeof(", o);
-            emit_expr(o, array);
-            fputs(") / sizeof((", o);
-            emit_expr(o, array);
-            fputs(")[0]))", o);
-        } else if (callback[i] >= 0) fprintf(o, "_wind_cb_%d", callback[i]);
-        else if (has_callback) fprintf(o, "_wind_arg_%d", i);
-        else emit_expr(o, e->as.call.args[arg_index[i]]);
+        if (source_buffers[i]) {
+            int int_length = binding->args[i] == TK_KW_INT;
+            if (int_length) fputs("_wind_buffer_length(", o);
+            emit_buffer_length(o, e, binding, arg_index, source_buffers[i]);
+            if (int_length) fputc(')', o);
+        } else if (callback[i] >= 0) {
+            fprintf(o, "_wind_cb_%d", callback[i]);
+        } else {
+            if (binding->args[i] == TK_C_UCHAR_BUFFER) fputs("(unsigned char *)", o);
+            if (binding->args[i] == TK_C_CONST_UCHAR_BUFFER) fputs("(const unsigned char *)", o);
+            if (has_callback) fprintf(o, "_wind_arg_%d", i);
+            else emit_expr(o, e->as.call.args[arg_index[i]]);
+        }
     }
     fputc(')', o);
     if (binding->copy_string) {
@@ -1969,7 +1999,10 @@ int wind_codegen(const Program *p, FILE *out, WindDiagnostics *diags, int gc_str
         fputs("#include <limits.h>\n"
               "__attribute__((unused)) static int _wind_buffer_length(size_t n) {\n"
               "    if (n > INT_MAX) { fputs(\"Wind: C buffer length exceeds INT_MAX\\n\", stderr); exit(EXIT_FAILURE); }\n"
-              "    return (int)n;\n}\n\n", out);
+              "    return (int)n;\n}\n"
+              "__attribute__((unused)) static size_t _wind_shared_length(size_t a, size_t b) {\n"
+              "    if (a != b) { fputs(\"Wind: C buffers sharing a length must have equal lengths\\n\", stderr); exit(EXIT_FAILURE); }\n"
+              "    return a;\n}\n\n", out);
 
     for (int i = 0; i < p->body.n; i++)
         if (p->body.items[i]->kind == ST_FUNC) emit_func(out, p->body.items[i]);

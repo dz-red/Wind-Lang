@@ -155,13 +155,16 @@ static TokenKind wind_type(CXType type) {
         case CXType_Pointer: {
             CXType pointee = api.getCanonicalType(api.getPointeeType(type));
             if (api.isVolatileQualifiedType(pointee)) break;
+            int is_const = api.isConstQualifiedType(pointee);
+            if (pointee.kind == CXType_Void) return is_const ? TK_C_CONST_VOID_BUFFER : TK_C_VOID_BUFFER;
+            if (pointee.kind == CXType_UChar) return is_const ? TK_C_CONST_UCHAR_BUFFER : TK_C_UCHAR_BUFFER;
             if (pointee.kind == CXType_Int)
-                return api.isConstQualifiedType(pointee) ? TK_C_CONST_INT_BUFFER : TK_C_INT_BUFFER;
+                return is_const ? TK_C_CONST_INT_BUFFER : TK_C_INT_BUFFER;
             if (pointee.kind == CXType_Double)
-                return api.isConstQualifiedType(pointee) ? TK_C_CONST_FRAC_BUFFER : TK_C_FRAC_BUFFER;
+                return is_const ? TK_C_CONST_FRAC_BUFFER : TK_C_FRAC_BUFFER;
             if (pointee.kind == CXType_FunctionProto) return TK_C_CALLBACK;
-            if ((pointee.kind == CXType_Char_S || pointee.kind == CXType_Char_U) &&
-                api.isConstQualifiedType(pointee) && !api.isVolatileQualifiedType(pointee)) return TK_KW_STR;
+            if ((pointee.kind == CXType_Char_S || pointee.kind == CXType_Char_U) && is_const)
+                return TK_KW_STR;
             break;
         }
         default: break;
@@ -305,12 +308,18 @@ static enum CXChildVisitResult visit(CXCursor cursor, CXCursor parent, CXClientD
     f->result_record = record_type(lookup->header, result);
     f->result = f->result_record ? TK_C_RECORD : wind_type(result);
     if (f->result == TK_BAD || f->result == TK_C_CALLBACK ||
-        wind_c_buffer_element(f->result) != TK_BAD) return CXChildVisit_Break;
+        wind_c_buffer_element(f->result) != TK_BAD || wind_c_byte_buffer(f->result))
+        return CXChildVisit_Break;
     for (int i = 0; i < f->nargs; i++) {
         CXType raw = api.getArgType(original, (unsigned)i);
         CXType arg = api.getCanonicalType(raw);
         f->arg_records[i] = record_type(lookup->header, raw);
         f->args[i] = f->arg_records[i] ? TK_C_RECORD : wind_type(arg);
+        if (f->args[i] == TK_BAD && arg.kind == _Generic((size_t)0,
+                unsigned short: CXType_UShort, unsigned int: CXType_UInt,
+                unsigned long: CXType_ULong, unsigned long long: CXType_ULongLong,
+                default: CXType_Invalid))
+            f->args[i] = TK_C_SIZE;
         if (f->args[i] == TK_BAD || f->args[i] == TK_KW_VOID) return CXChildVisit_Break;
         if (f->args[i] == TK_C_CALLBACK &&
             !scalar_signature(api.getCanonicalType(api.getPointeeType(arg)), &f->callbacks[i]))
